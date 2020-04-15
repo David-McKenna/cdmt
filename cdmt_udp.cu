@@ -4,29 +4,29 @@
 #include <unistd.h>
 #include <math.h>
 #include <time.h>
-#include<errno.h>
+#include <errno.h>
 #include <cuda.h>
 #include <cufft.h>
 #include <helper_functions.h>
 #include <helper_cuda.h>
 #include <getopt.h>
-#include <hdf5.h>
 
 #define HEADERSIZE 4096
 #define DMCONSTANT 2.41e-10
 
+// sigproc code generates a lot of string literal errors; silence them.
+#pragma GCC diagnostic ignored "-Wwrite-strings"
+
 // Struct for header information
 struct header {
-  int64_t headersize,buffersize;
-  unsigned int nchan,nsamp,nbit,nif,nsub;
-  int machine_id,telescope_id,nbeam,ibeam,sumif;
+  int nchan,nsamp,nbit,nsub;
   double tstart,tsamp,fch1,foff,fcen,bwchan;
-  double src_raj,src_dej,az_start,za_start;
-  char source_name[80],ifstream[8],inpfile[80];
+  double src_raj,src_dej;
+  char source_name[80];
   char *rawfname[4];
 };
 
-struct header read_h5_header(char *fname);
+struct header read_sigproc_header(char *fname, char *dataname);
 void get_channel_chirp(double fcen,double bw,float dm,int nchan,int nbin,int nsub,cufftComplex *c);
 __global__ void transpose_unpadd_and_detect(cufftComplex *cp1,cufftComplex *cp2,int nbin,int nchan,int nfft,int nsub,int noverlap,int nsamp,float *fbuf);
 static __device__ __host__ inline cufftComplex ComplexScale(cufftComplex a,float s);
@@ -44,15 +44,15 @@ void write_filterbank_header(struct header h,FILE *file);
 // Usage
 void usage()
 {
-  printf("cdmt -P <part> -d <DM start,step,num> -D <GPU device> -b <ndec> -N <forward FFT size> -n <overlap region> -o <outputname> <file.h5>\n\n");
-  printf("Compute coherently dedispersed SIGPROC filterbank files from LOFAR complex voltage data in HDF5 format.\n");
-  printf("-P <part>        Specify part number for input file [integer, default: 0]\n");
+  printf("cdmt -d <DM start,step,num> -D <GPU device> -b <ndec> -N <forward FFT size> -n <overlap region> -o <outputname> -s <sigproc header location> <fil prefix>\n\n");
+  printf("Compute coherently dedispersed SIGPROC filterbank files from LOFAR complex voltage data in raw udp format.\n");
   printf("-D <GPU device>  Select GPU device [integer, default: 0]\n");
   printf("-b <ndec>        Number of time samples to average [integer, default: 1]\n");
   printf("-d <DM start, step, num>  DM start and stepsize, number of DM trials\n");
   printf("-o <outputname>           Output filename [default: cdmt]\n");
   printf("-N <forward FFT size>     Forward FFT size [integer, default: 65536]\n");
   printf("-n <overlap region>       Overlap region [integer, default: 2048]\n");
+  printf("-s <sigproc header location>  Sigproc header to read metadata from [default: fil prefix.sigprochdr]\n");
 
   return;
 }
@@ -61,7 +61,7 @@ int main(int argc,char *argv[])
 {
   int i,nsamp,nfft,mbin,nvalid,nchan=8,nbin=65536,noverlap=2048,nsub=20,ndm,ndec=1;
   int idm,iblock,nread,mchan,msamp,mblock,msum=1024;
-  char *header,*h5buf[4],*dh5buf[4];
+  char *header,*udpbuf[4],*dudpbuf[4];
   FILE *rawfile[4],*file;
   unsigned char *cbuf,*dcbuf;
   float *fbuf,*dfbuf;
@@ -70,10 +70,9 @@ int main(int argc,char *argv[])
   cufftHandle ftc2cf,ftc2cb;
   int idist,odist,iembed,oembed,istride,ostride;
   dim3 blocksize,gridsize;
-  struct header h5;
   clock_t startclock;
   float *dm,*ddm,dm_start,dm_step;
-  char fname[128],fheader[1024],*h5fname,obsid[128]="cdmt";
+  char fname[128],fheader[1024],*udpfname,sphdrfname[1024],obsid[128]="cdmt";
   int bytes_read;
   int part=0,device=0;
   int arg=0;
@@ -81,61 +80,91 @@ int main(int argc,char *argv[])
 
   // Read options
   if (argc>1) {
-    while ((arg=getopt(argc,argv,"P:d:D:ho:b:N:n:"))!=-1) {
+    while ((arg=getopt(argc,argv,"d:D:ho:b:N:n:s:"))!=-1) {
       switch (arg) {
-  
+	
       case 'n':
-  noverlap=atoi(optarg);
-  break;
+	noverlap=atoi(optarg);
+	break;
 
       case 'N':
-  nbin=atoi(optarg);
-  break;
+	nbin=atoi(optarg);
+	break;
 
       case 'b':
-  ndec=atoi(optarg);
-  break;
+	ndec=atoi(optarg);
+	break;
 
       case 'o':
-  strcpy(obsid,optarg);
-  break;
-  
-      case 'P':
-  part=atoi(optarg);
-  break;
+	strcpy(obsid,optarg);
+	break;
 
       case 'D':
-  device=atoi(optarg);
-  break;
-  
+	device=atoi(optarg);
+	break;
+	
       case 'd':
   sscanf(optarg,"%f,%f,%d",&dm_start,&dm_step,&ndm);
   break;
 
+      case 's':
+  strcpy(sphdrfname,optarg);
+  break;
+
       case 'h':
-  usage();
-  return 0;
+	usage();
+	return 0;
       }
     }
   } else {
     usage();
     return 0;
   }
-  h5fname=argv[optind];
+  udpfname=argv[optind];
+
+  if (strlen(sphdrfname) < 2) {
+    sprintf(sphdrfname, "%s.sigprochdr", udpfname);
+  }
   
-  // Read HDF5 header
-  h5=read_h5_header(h5fname);
+  // Read sigproc header
+  struct header hdr = read_sigproc_header(sphdrfname, udpfname);
 
+  printf("====HEADER INFORMATION====\n");
+  printf("nsub: %d, nsamp: %d, nbit: %d, nchan %d\n", hdr.nsub, hdr.nsamp, hdr.nbit, hdr.nchan);
+  printf("tstart: %lf\n", hdr.tstart);
+  printf("tsamp: %lf\n", hdr.tsamp);
+  printf("fch1: %lf\n", hdr.fch1);
+  printf("foff: %lf\n", hdr.foff);
+  printf("fcen: %lf\n", hdr.fcen);
+  printf("bwchan: %lf\n", hdr.bwchan);
+  printf("src_raj: %lf\n", hdr.src_raj);
+  printf("src_dej: %lf\n", hdr.src_dej);
+  printf("source: %s", hdr.source_name);
+  printf("====HEADER INFORMATION====\n");
 
-  // Set number of subbands
-  nsub=h5.nsub;
+  // Read the number of subbands
+  nsub=hdr.nsub;
 
   // Adjust header for filterbank format
-  h5.tsamp*=nchan*ndec;
-  h5.nchan=nsub*nchan;
-  h5.nbit=8;
-  h5.fch1=h5.fcen+0.5*h5.nsub*h5.bwchan-0.5*h5.bwchan/nchan;
-  h5.foff=-fabs(h5.bwchan/nchan);
+  hdr.tsamp*=nchan*ndec;
+  hdr.nchan=nsub*nchan;
+  hdr.nbit=8;
+  hdr.fch1=hdr.fcen+0.5*hdr.nsub*hdr.bwchan-0.5*hdr.bwchan/nchan;
+  hdr.foff=-fabs(hdr.bwchan/nchan);
+
+
+  printf("====HEADER INFORMATION====\n");
+  printf("nsub: %d, nsamp: %d, nbit: %d, nchan %d\n", hdr.nsub, hdr.nsamp, hdr.nbit, hdr.nchan);
+  printf("tstart: %lf\n", hdr.tstart);
+  printf("tsamp: %lf\n", hdr.tsamp);
+  printf("fch1: %lf\n", hdr.fch1);
+  printf("foff: %lf\n", hdr.foff);
+  printf("fcen: %lf\n", hdr.fcen);
+  printf("bwchan: %lf\n", hdr.bwchan);
+  printf("src_raj: %lf\n", hdr.src_raj);
+  printf("src_dej: %lf\n", hdr.src_dej);
+  printf("source: %s", hdr.source_name);
+  printf("====HEADER INFORMATION====\n");
 
   // Data size
   nvalid=nbin-2*noverlap;
@@ -152,10 +181,10 @@ int main(int argc,char *argv[])
   checkCudaErrors(cudaSetDevice(device));
 
   // Allocate memory for complex timeseries
-  checkCudaErrors(cudaMalloc((void **) &cp1, (size_t) sizeof(cufftComplex)*nbin*nfft*nsub));
-  checkCudaErrors(cudaMalloc((void **) &cp2, (size_t) sizeof(cufftComplex)*nbin*nfft*nsub));
-  checkCudaErrors(cudaMalloc((void **) &cp1p,(size_t) sizeof(cufftComplex)*nbin*nfft*nsub));
-  checkCudaErrors(cudaMalloc((void **) &cp2p,(size_t) sizeof(cufftComplex)*nbin*nfft*nsub));
+  checkCudaErrors(cudaMalloc((void **) &cp1,  (size_t) sizeof(cufftComplex)*nbin*nfft*nsub));
+  checkCudaErrors(cudaMalloc((void **) &cp2,  (size_t) sizeof(cufftComplex)*nbin*nfft*nsub));
+  checkCudaErrors(cudaMalloc((void **) &cp1p, (size_t) sizeof(cufftComplex)*nbin*nfft*nsub));
+  checkCudaErrors(cudaMalloc((void **) &cp2p, (size_t) sizeof(cufftComplex)*nbin*nfft*nsub));
 
   // Allocate device memory for chirp
   checkCudaErrors(cudaMalloc((void **) &dc, (size_t) sizeof(cufftComplex)*nbin*nsub*ndm));
@@ -171,8 +200,8 @@ int main(int argc,char *argv[])
   // Allocate memory for redigitized output and header
   header=(char *) malloc(sizeof(char)*HEADERSIZE);
   for (i=0;i<4;i++) {
-    h5buf[i]=(char *) malloc(sizeof(char)*nsamp*nsub);
-    checkCudaErrors(cudaMalloc((void **) &dh5buf[i], (size_t) sizeof(char)*nsamp*nsub));
+    udpbuf[i]=(char *) malloc(sizeof(char)*nsamp*nsub);
+    checkCudaErrors(cudaMalloc((void **) &dudpbuf[i], (size_t) sizeof(char)*nsamp*nsub));
   }
 
   // Allocate output buffers
@@ -199,11 +228,11 @@ int main(int argc,char *argv[])
   // Compute chirp
   blocksize.x=32; blocksize.y=32; blocksize.z=1;
   gridsize.x=nsub/blocksize.x+1; gridsize.y=nchan/blocksize.y+1; gridsize.z=ndm/blocksize.z+1;
-  compute_chirp<<<gridsize,blocksize>>>(h5.fcen,nsub*h5.bwchan,ddm,nchan,nbin,nsub,ndm,dc);
+  compute_chirp<<<gridsize,blocksize>>>(hdr.fcen,nsub*hdr.bwchan,ddm,nchan,nbin,nsub,ndm,dc);
 
   // Write temporary filterbank header
   file=fopen("/tmp/header.fil","w");
-  write_filterbank_header(h5,file);
+  write_filterbank_header(hdr,file);
   fclose(file);
   file=fopen("/tmp/header.fil","r");
   bytes_read=fread(fheader,sizeof(char),1024,file);
@@ -225,7 +254,7 @@ int main(int argc,char *argv[])
 
   // Read files
   for (i=0;i<4;i++) {
-    rawfile[i]=fopen(h5.rawfname[i],"r");
+    rawfile[i]=fopen(hdr.rawfname[i],"r");
   }
 
   // Loop over input file contents
@@ -233,20 +262,20 @@ int main(int argc,char *argv[])
     // Read block
     startclock=clock();
     for (i=0;i<4;i++)
-      nread=fread(h5buf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub;
+      nread=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub;
     if (nread==0)
       break;
-    printf("Block: %d: Read %d MB in %.2f s\n",iblock,sizeof(char)*nread*nsub*4/(1<<20),(float) (clock()-startclock)/CLOCKS_PER_SEC);
+    printf("Block: %d: Read %ld MB in %.2f s\n",iblock,sizeof(char)*nread*nsub*4/(1<<20),(float) (clock()-startclock)/CLOCKS_PER_SEC);
 
     // Copy buffers to device
     startclock=clock();
     for (i=0;i<4;i++)
-      checkCudaErrors(cudaMemcpy(dh5buf[i],h5buf[i],sizeof(char)*nread*nsub,cudaMemcpyHostToDevice));
+      checkCudaErrors(cudaMemcpy(dudpbuf[i],udpbuf[i],sizeof(char)*nread*nsub,cudaMemcpyHostToDevice));
 
     // Unpack data and padd data
     blocksize.x=32; blocksize.y=32; blocksize.z=1;
     gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft/blocksize.y+1; gridsize.z=nsub/blocksize.z+1;
-    unpack_and_padd<<<gridsize,blocksize>>>(dh5buf[0],dh5buf[1],dh5buf[2],dh5buf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
+    unpack_and_padd<<<gridsize,blocksize>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
 
     // Perform FFTs
     checkCudaErrors(cufftExecC2C(ftc2cf,(cufftComplex *) cp1p,(cufftComplex *) cp1p,CUFFT_FORWARD));
@@ -294,9 +323,9 @@ int main(int argc,char *argv[])
       blocksize.x=32; blocksize.y=32; blocksize.z=1;
       gridsize.x=mchan/blocksize.x+1; gridsize.y=mblock/blocksize.y+1; gridsize.z=1;
       if (ndec==1)
-  redigitize<<<gridsize,blocksize>>>(dfbuf,mchan,mblock,msum,zavg,zstd,3.0,5.0,dcbuf);
+	redigitize<<<gridsize,blocksize>>>(dfbuf,mchan,mblock,msum,zavg,zstd,3.0,5.0,dcbuf);
       else
-  decimate_and_redigitize<<<gridsize,blocksize>>>(dfbuf,ndec,mchan,mblock,msum,zavg,zstd,3.0,5.0,dcbuf);      
+	decimate_and_redigitize<<<gridsize,blocksize>>>(dfbuf,ndec,mchan,mblock,msum,zavg,zstd,3.0,5.0,dcbuf);      
 
       // Copy buffer to host
       checkCudaErrors(cudaMemcpy(cbuf,dcbuf,sizeof(unsigned char)*msamp*mchan/ndec,cudaMemcpyDeviceToHost));
@@ -318,9 +347,9 @@ int main(int argc,char *argv[])
   // Free
   free(header);
   for (i=0;i<4;i++) {
-    free(h5buf[i]);
-    cudaFree(dh5buf);
-    free(h5.rawfname[i]);
+    free(udpbuf[i]);
+    cudaFree(dudpbuf);
+    free(hdr.rawfname[i]);
   }
   free(fbuf);
   free(dm);
@@ -347,169 +376,221 @@ int main(int argc,char *argv[])
   return 0;
 }
 
-// This is a simple H5 reader for complex voltage data. Very little
-// error checking is done.
-struct header read_h5_header(char *fname)
-{
-  int i,len,ibeam,isap;
-  struct header h;
-  hid_t file_id,attr_id,sap_id,beam_id,memtype,group_id,space,coord_id;
-  char *string,*pch;
-  const char *stokes[]={"_S0_","_S1_","_S2_","_S3_"};
-  char *froot,*fpart,*ftest,group[32];
-  FILE *file;
 
-  // Find filenames
-  for (i=0;i<4;i++) {
-    pch=strstr(fname,stokes[i]);
-    if (pch!=NULL)
-      break;
+
+// Rip out sigproc's header reader. Don't have the time to spend several hours reimplementing it; all credit to Lorimer et al.
+//BEGIN SIGPROC READ_HEADER.C
+//
+int strings_equal (char *string1, char *string2) /* includefile */
+{
+  if (!strcmp(string1,string2)) {
+    return 1;
+  } else {
+    return 0;
   }
-  len=strlen(fname)-strlen(pch);
-  froot=(char *) malloc(sizeof(char)*(len+1));
-  fpart=(char *) malloc(sizeof(char)*(strlen(pch)-6));
-  ftest=(char *) malloc(sizeof(char)*(len+20));
-  strncpy(froot,fname,len);
-  strncpy(fpart,pch+4,strlen(pch)-7);
+}
+/* read a string from the input which looks like nchars-char[1-nchars] */
+void get_string(FILE *inputfile, int *nbytes, char string[])
+{
+  int nchar;
+  strcpy(string,"ERROR");
+  fread(&nchar, sizeof(int), 1, inputfile);
+  *nbytes=sizeof(int);
+  if (feof(inputfile)) exit(0);
+  if (nchar>80 || nchar<1) return;
+  fread(string, nchar, 1, inputfile);
+  string[nchar]='\0';
+  *nbytes+=nchar;
+}
+
+/* attempt to read in the general header info from a pulsar data file */
+struct header read_header(FILE *inputfile) /* includefile */
+{
+  char string[80], message[80];
+  int nbytes,totalbytes,expecting_rawdatafile=0,expecting_source_name=0; 
+  int isign=0;
+  struct header hdr;
+
+
+  /* try to read in the first line of the header */
+  get_string(inputfile,&nbytes,string);
+  if (!strings_equal(string, (char *) "HEADER_START")) {
+  /* the data file is not in standard format, rewind and return */
+  rewind(inputfile);
+  fprintf(stderr, "Unexpected input header; exiting.");
+  exit(1);
+  }
+  /* store total number of bytes read so far */
+  totalbytes=nbytes;
+
+  /* loop over and read remaining header lines until HEADER_END reached */
+  // David McKenna: We don't need all of these; ignore those values and just reference their lengths
+  while (1) {
+    get_string(inputfile,&nbytes,string);
+    if (strings_equal(string, (char *) "HEADER_END")) break;
+    totalbytes+=nbytes;
+    if (strings_equal(string, (char *) "rawdatafile")) {
+      expecting_rawdatafile=1;
+    } else if (strings_equal(string, (char *) "source_name")) {
+      expecting_source_name=1;
+    } else if (strings_equal(string, (char *) "FREQUENCY_START")) {
+      // pass
+    } else if (strings_equal(string, (char *) "FREQUENCY_END")) {
+      // pass
+    } else if (strings_equal(string, (char *) "az_start")) {
+      fseek(inputfile, sizeof(double), SEEK_CUR);
+      totalbytes+=sizeof(double);
+    } else if (strings_equal(string, (char *) "za_start")) {
+      fseek(inputfile, sizeof(double), SEEK_CUR);
+      totalbytes+=sizeof(double);
+    } else if (strings_equal(string, (char *) "src_raj")) {
+      fread(&(hdr.src_raj),sizeof(hdr.src_raj),1,inputfile);
+      totalbytes+=sizeof(hdr.src_raj);
+    } else if (strings_equal(string, (char *) "src_dej")) {
+      fread(&(hdr.src_dej),sizeof(hdr.src_dej),1,inputfile);
+      totalbytes+=sizeof(hdr.src_dej);
+    } else if (strings_equal(string, (char *) "tstart")) {
+      fread(&(hdr.tstart),sizeof(hdr.tstart),1,inputfile);
+      totalbytes+=sizeof(hdr.tstart);
+    } else if (strings_equal(string, (char *) "tsamp")) {
+      fread(&(hdr.tsamp),sizeof(hdr.tsamp),1,inputfile);
+      totalbytes+=sizeof(hdr.tsamp);
+    } else if (strings_equal(string, (char *) "period")) {
+      fseek(inputfile, sizeof(double), SEEK_CUR);
+      totalbytes+=sizeof(double);
+    } else if (strings_equal(string, (char *) "fch1")) {
+      fread(&(hdr.fch1),sizeof(hdr.fch1),1,inputfile);
+      totalbytes+=sizeof(hdr.fch1);
+    } else if (strings_equal(string, (char *) "fchannel")) {
+      fseek(inputfile, sizeof(double), SEEK_CUR);
+      totalbytes+=sizeof(double);
+    } else if (strings_equal(string, (char *) "foff")) {
+      fread(&(hdr.foff),sizeof(hdr.foff),1,inputfile);
+      totalbytes+=sizeof(hdr.foff);
+    } else if (strings_equal(string, (char *) "nchans")) {
+      // nsub seems to be nchans in the sigproc hdr
+      fread(&(hdr.nsub),sizeof(hdr.nsub),1,inputfile);
+      totalbytes+=sizeof(hdr.nsub);
+    } else if (strings_equal(string, (char *) "telescope_id")) {
+      fseek(inputfile, sizeof(int), SEEK_CUR);
+      totalbytes+=sizeof(int);
+    } else if (strings_equal(string, (char *) "machine_id")) {
+      fseek(inputfile, sizeof(int), SEEK_CUR);
+      totalbytes+=sizeof(int);
+    } else if (strings_equal(string, (char *) "data_type")) {
+      fseek(inputfile, sizeof(int), SEEK_CUR);
+      totalbytes+=sizeof(int);
+    } else if (strings_equal(string, (char *) "ibeam")) {
+      fseek(inputfile, sizeof(int), SEEK_CUR);
+      totalbytes+=sizeof(int);
+    } else if (strings_equal(string, (char *) "nbeams")) {
+      fseek(inputfile, sizeof(int), SEEK_CUR);
+      totalbytes+=sizeof(int);
+    } else if (strings_equal(string, (char *) "nbits")) {
+      fread(&(hdr.nbit),sizeof(hdr.nbit),1,inputfile);
+      totalbytes+=sizeof(hdr.nbit);
+    } else if (strings_equal(string, (char *) "barycentric")) {
+      fseek(inputfile, sizeof(int), SEEK_CUR);
+      totalbytes+=sizeof(int);
+    } else if (strings_equal(string, (char *) "pulsarcentric")) {
+      fseek(inputfile, sizeof(int), SEEK_CUR);
+      totalbytes+=sizeof(int);
+    } else if (strings_equal(string, (char *) "nbins")) {
+      fseek(inputfile, sizeof(int), SEEK_CUR);
+      totalbytes+=sizeof(int);
+    } else if (strings_equal(string, (char *) "nsamples")) {
+      /* read this one only for backwards compatibility */
+      fseek(inputfile, sizeof(int), SEEK_CUR);
+      totalbytes+=sizeof(int);
+    } else if (strings_equal(string, (char *) "nifs")) {
+      fseek(inputfile, sizeof(int), SEEK_CUR);
+      totalbytes+=sizeof(int);
+    } else if (strings_equal(string, (char *) "npuls")) {
+      totalbytes+=sizeof(long int);
+    } else if (strings_equal(string, (char *) "refdm")) {
+      fseek(inputfile, sizeof(double), SEEK_CUR);
+      totalbytes+=sizeof(double);
+    } else if (strings_equal(string, (char *) "signed")) {
+      fread(&isign,sizeof(isign),1,inputfile);
+      totalbytes+=sizeof(isign);
+    } else if (expecting_rawdatafile) {
+      //strcpy(hdr.rawfname,string);
+      expecting_rawdatafile=0;
+    } else if (expecting_source_name) {
+      strcpy(hdr.source_name,string);
+      expecting_source_name=0;
+    } else {
+      sprintf(message,"read_header - unknown parameter: %s\n",string);
+      fprintf(stderr,"ERROR: %s\n",message);
+      exit(1);
+    } 
+    if (totalbytes != ftell(inputfile)){
+      fprintf(stderr,"ERROR: Header bytes does not equal file position\n");
+      fprintf(stderr,"String was: '%s'\n",string);
+      fprintf(stderr,"       header: %d file: %ld\n",totalbytes,ftell(inputfile));
+      exit(1);
+    }
+
+
+  } 
+
+  /* add on last header string */
+  totalbytes+=nbytes;
+
+  if (totalbytes != ftell(inputfile)){
+    fprintf(stderr,"ERROR: Header bytes does not equal file position\n");
+    fprintf(stderr,"       header: %d file: %ld\n",totalbytes,ftell(inputfile));
+    exit(1);
+  }
+
+  /* return total number of bytes read */
+  return hdr;
+}
+// END SIGPROC READ_HEADER.c
+
+
+
+
+struct header read_sigproc_header(char *fname, char *dataname)
+{
+
+  char ftest[2048];
+  int i;
+  FILE *tmpf;
+
+  tmpf = fopen(fname, "r");
+  struct header hdr = read_header(tmpf);
+  fclose(tmpf);
+
 
   // Check files
   for (i=0;i<4;i++) {
     // Format file name
-    sprintf(ftest,"%s_S%d_%s.raw",froot,i,fpart);
+    sprintf(ftest,"%s_S%d.rawfil",dataname,i);
     // Try to open
-    if ((file=fopen(ftest,"r"))!=NULL) {
-      fclose(file);
+    if ((tmpf=fopen(ftest,"r"))!=NULL) {
+      fclose(tmpf);
     } else {
       fprintf(stderr,"Raw file %s not found\n",ftest);
       exit (-1);
     }
-    h.rawfname[i]=(char *) malloc(sizeof(char)*(strlen(ftest)+1));
-    strcpy(h.rawfname[i],ftest);
+    hdr.rawfname[i]=(char *) malloc(sizeof(char) * strlen(dataname) + sizeof(char)*(9));
+    strcpy(hdr.rawfname[i],ftest);
   }
 
-  // Get beam number
-  for (i=0;i<4;i++) {
-    pch=strstr(fname,"_B");
-    if (pch!=NULL)
-      break;
-  }
-  sscanf(pch+2,"%d",&ibeam);
+  tmpf = fopen(hdr.rawfname[0], "r");
+  fseek(tmpf, 0, SEEK_END);
+  long int charSize = ftell(tmpf);
+  fclose(tmpf);
 
-  // Get SAP number
-  for (i=0;i<4;i++) {
-    pch=strstr(fname,"_SAP");
-    if (pch!=NULL)
-      break;
-  }
-  sscanf(pch+4,"%d",&isap);
 
-  // Free
-  free(froot);
-  free(fpart);
-  free(ftest);
 
-  // Open file
-  file_id=H5Fopen(fname,H5F_ACC_RDONLY,H5P_DEFAULT);
+  hdr.fcen = hdr.fch1 + (hdr.foff * hdr.nsub * 0.5);
+  hdr.bwchan = fabs(hdr.foff);
 
-  // Open subarray pointing group
-  sprintf(group,"SUB_ARRAY_POINTING_%03d",isap);
-  sap_id=H5Gopen(file_id,group,H5P_DEFAULT);
+  hdr.nsamp = (int) (charSize / hdr.nsub / ((float) (hdr.nbit) / (float) 8));
 
-  // Start MJD
-  attr_id=H5Aopen(sap_id,"EXPTIME_START_MJD",H5P_DEFAULT);
-  H5Aread(attr_id,H5T_IEEE_F64LE,&h.tstart);
-  H5Aclose(attr_id);
-
-  // Declination
-  attr_id=H5Aopen(sap_id,"POINT_DEC",H5P_DEFAULT);
-  H5Aread(attr_id,H5T_IEEE_F64LE,&h.src_dej);
-  H5Aclose(attr_id);
-
-  // Right ascension
-  attr_id=H5Aopen(sap_id,"POINT_RA",H5P_DEFAULT);
-  H5Aread(attr_id,H5T_IEEE_F64LE,&h.src_raj);
-  H5Aclose(attr_id);
-
-  // Open beam
-  sprintf(group,"BEAM_%03d",ibeam);
-  beam_id=H5Gopen(sap_id,group,H5P_DEFAULT);
-
-  // Number of samples
-  attr_id=H5Aopen(beam_id,"NOF_SAMPLES",H5P_DEFAULT);
-  H5Aread(attr_id,H5T_STD_U32LE,&h.nsamp);
-  H5Aclose(attr_id);
-
-  // Center frequency
-  attr_id=H5Aopen(beam_id,"BEAM_FREQUENCY_CENTER",H5P_DEFAULT);
-  H5Aread(attr_id,H5T_IEEE_F64LE,&h.fcen);
-  H5Aclose(attr_id);
-
-  // Center frequency unit
-  attr_id=H5Aopen(beam_id,"BEAM_FREQUENCY_CENTER_UNIT",H5P_DEFAULT);
-  memtype=H5Tcopy(H5T_C_S1);
-  H5Tset_size(memtype,H5T_VARIABLE);
-  H5Aread(attr_id,memtype,&string);
-  H5Aclose(attr_id);
-  if (strcmp(string,"Hz")==0)
-    h.fcen/=1e6;
-
-  // Channel bandwidth
-  attr_id=H5Aopen(beam_id,"CHANNEL_WIDTH",H5P_DEFAULT);
-  H5Aread(attr_id,H5T_IEEE_F64LE,&h.bwchan);
-  H5Aclose(attr_id);
-
-  // Center frequency unit
-  attr_id=H5Aopen(beam_id,"CHANNEL_WIDTH_UNIT",H5P_DEFAULT);
-  memtype=H5Tcopy(H5T_C_S1);
-  H5Tset_size(memtype,H5T_VARIABLE);
-  H5Aread(attr_id,memtype,&string);
-  H5Aclose(attr_id);
-  if (strcmp(string,"Hz")==0)
-    h.bwchan/=1e6;
-
-  // Get source
-  attr_id=H5Aopen(beam_id,"TARGETS",H5P_DEFAULT);
-  memtype=H5Tcopy(H5T_C_S1);
-  H5Tset_size(memtype,H5T_VARIABLE);
-  H5Aread(attr_id,memtype,&string);
-  H5Aclose(attr_id);
-  strcpy(h.source_name,string);
-
-  // Open coordinates
-  coord_id=H5Gopen(beam_id,"COORDINATES",H5P_DEFAULT);
-
-  // Open coordinate 0
-  group_id=H5Gopen(coord_id,"COORDINATE_0",H5P_DEFAULT);
-
-  // Sampling time
-  attr_id=H5Aopen(group_id,"INCREMENT",H5P_DEFAULT);
-  H5Aread(attr_id,H5T_IEEE_F64LE,&h.tsamp);
-  H5Aclose(attr_id);
-
-  // Close group
-  H5Gclose(group_id);
-
-  // Open coordinate 1
-  group_id=H5Gopen(coord_id,"COORDINATE_1",H5P_DEFAULT);
-
-  // Number of subbands
-  attr_id=H5Aopen(group_id,"AXIS_VALUES_WORLD",H5P_DEFAULT);
-  space=H5Aget_space(attr_id);
-  h.nsub=H5Sget_simple_extent_npoints(space);
-  H5Aclose(attr_id);
-
-  // Close group
-  H5Gclose(group_id);
-
-  // Close coordinates
-  H5Gclose(coord_id);
-
-  // Close beam, sap and file
-  H5Gclose(beam_id);
-  H5Gclose(sap_id);
-  H5Fclose(file_id);
-
-  return h;
+  return hdr;
 }
 
 // Scale cufftComplex 
@@ -688,7 +769,7 @@ __global__ void transpose_unpadd_and_detect(cufftComplex *cp1,cufftComplex *cp2,
       
       // Select data points from valid region
       if (ibin>=noverlap && ibin<=nbin-noverlap && isamp>=0 && isamp<nsamp)
-  fbuf[idx2]=cp1[idx1].x*cp1[idx1].x+cp1[idx1].y*cp1[idx1].y+cp2[idx1].x*cp2[idx1].x+cp2[idx1].y*cp2[idx1].y;
+	fbuf[idx2]=cp1[idx1].x*cp1[idx1].x+cp1[idx1].y*cp1[idx1].y+cp2[idx1].x*cp2[idx1].x+cp2[idx1].y*cp2[idx1].y;
     }
   }
 
@@ -753,11 +834,11 @@ double dec2sex(double x)
 
 void write_filterbank_header(struct header h,FILE *file)
 {
-  double ra,de;
+  //double ra,de;
 
 
-  ra=dec2sex(h.src_raj/15.0);
-  de=dec2sex(h.src_dej);
+  //ra=dec2sex(h.src_raj/15.0);
+  //de=dec2sex(h.src_dej);
   
   send_string("HEADER_START",file);
   send_string("rawdatafile",file);
@@ -766,8 +847,8 @@ void write_filterbank_header(struct header h,FILE *file)
   send_string(h.source_name,file);
   send_int("machine_id",11,file);
   send_int("telescope_id",11,file);
-  send_double("src_raj",ra,file);
-  send_double("src_dej",de,file);
+  send_double("src_raj",h.src_raj,file);
+  send_double("src_dej",h.src_dej,file);
   send_int("data_type",1,file);
   send_double("fch1",h.fch1,file);
   send_double("foff",h.foff,file);
@@ -867,8 +948,8 @@ __global__ void decimate_and_redigitize(float *z,int ndec,int nchan,int nblock,i
     for (isum=0;isum<nsum;isum+=ndec) {
       idx2=ichan+nchan*(isum/ndec+iblock*nsum/ndec);
       for (idec=0,ztmp=0.0;idec<ndec;idec++) {
-  idx1=ichan+nchan*(isum+idec+iblock*nsum);
-  ztmp+=z[idx1];
+	idx1=ichan+nchan*(isum+idec+iblock*nsum);
+	ztmp+=z[idx1];
       }
       ztmp/=(float) ndec;
       ztmp-=zoffset;
