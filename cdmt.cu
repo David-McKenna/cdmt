@@ -4,13 +4,14 @@
 #include <unistd.h>
 #include <math.h>
 #include <time.h>
-#include<errno.h>
+#include <errno.h>
 #include <cuda.h>
 #include <cufft.h>
 #include <helper_functions.h>
 #include <helper_cuda.h>
 #include <getopt.h>
 #include <hdf5.h>
+#include <limits.h>
 
 #define HEADERSIZE 4096
 #define DMCONSTANT 2.41e-10
@@ -18,7 +19,7 @@
 // Struct for header information
 struct header {
   int64_t headersize,buffersize;
-  unsigned int nchan,nsamp,nbit,nif,nsub;
+  unsigned int nchan,nsamp,nbit=0,nif,nsub;
   int machine_id,telescope_id,nbeam,ibeam,sumif;
   double tstart,tsamp,fch1,foff,fcen,bwchan;
   double src_raj,src_dej,az_start,za_start;
@@ -44,7 +45,7 @@ void write_filterbank_header(struct header h,FILE *file);
 // Usage
 void usage()
 {
-  printf("cdmt -P <part> -d <DM start,step,num> -D <GPU device> -b <ndec> -N <forward FFT size> -n <overlap region> -o <outputname> <file.h5>\n\n");
+  printf("cdmt -P <part> -d <DM start,step,num> -D <GPU device> -b <ndec> -N <forward FFT size> -n <overlap region> -o <outputname> <file.h5> -s <bytes to skip> -r <bytes to read>\n\n");
   printf("Compute coherently dedispersed SIGPROC filterbank files from LOFAR complex voltage data in HDF5 format.\n");
   printf("-P <part>        Specify part number for input file [integer, default: 0]\n");
   printf("-D <GPU device>  Select GPU device [integer, default: 0]\n");
@@ -53,6 +54,8 @@ void usage()
   printf("-o <outputname>           Output filename [default: cdmt]\n");
   printf("-N <forward FFT size>     Forward FFT size [integer, default: 65536]\n");
   printf("-n <overlap region>       Overlap region [integer, default: 2048]\n");
+  printf("-s <bytes>       Number of bytes to skip in the filterbank before stating processing [integer, default: 0]\n");
+  printf("-r <bytes>       Number of bytes to read in total from the -s offset [integer, default: length of file]");
 
   return;
 }
@@ -75,13 +78,14 @@ int main(int argc,char *argv[])
   float *dm,*ddm,dm_start,dm_step;
   char fname[128],fheader[1024],*h5fname,obsid[128]="cdmt";
   int bytes_read;
+  long int total_bytes_read=0,bytes_to_read=LONG_MAX,bytes_skip=0;
   int part=0,device=0;
   int arg=0;
   FILE **outfile;
 
   // Read options
   if (argc>1) {
-    while ((arg=getopt(argc,argv,"P:d:D:ho:b:N:n:"))!=-1) {
+    while ((arg=getopt(argc,argv,"P:d:D:ho:b:N:n:s:r:"))!=-1) {
       switch (arg) {
   
       case 'n':
@@ -107,6 +111,14 @@ int main(int argc,char *argv[])
       case 'D':
   device=atoi(optarg);
   break;
+
+      case 's':
+  bytes_skip=atol(optarg);
+  break;
+  
+      case 'r':
+  bytes_to_read=atol(optarg);
+  break;
   
       case 'd':
   sscanf(optarg,"%f,%f,%d",&dm_start,&dm_step,&ndm);
@@ -125,6 +137,15 @@ int main(int argc,char *argv[])
   
   // Read HDF5 header
   h5=read_h5_header(h5fname);
+
+  // Account for the difference in time in the new header if we skip bytes
+  if (bytes_skip) {
+    // Not initialised by default, putting this in encase read_h5_header is changed in future
+    if (h5.nbit == 0)
+      h5.nbit = 8;
+    // tstart = MJD, tsamp = seconds, 1 byte = 8 bits = 1 sample per file by default
+    h5.tstart += (double) (bytes_skip * (8.0 / ((double) h5.nbit))) * h5.tsamp / 86400.0;
+  }
 
 
   // Set number of subbands
@@ -226,6 +247,8 @@ int main(int argc,char *argv[])
   // Read files
   for (i=0;i<4;i++) {
     rawfile[i]=fopen(h5.rawfname[i],"r");
+    if (bytes_skip > 0)
+      fseek(rawfile[i],bytes_skip,SEEK_SET);
   }
 
   // Loop over input file contents
@@ -236,6 +259,10 @@ int main(int argc,char *argv[])
       nread=fread(h5buf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub;
     if (nread==0)
       break;
+
+    // Count up the total bytes read
+    total_bytes_read += nread;
+
     printf("Block: %d: Read %d MB in %.2f s\n",iblock,sizeof(char)*nread*nsub*4/(1<<20),(float) (clock()-startclock)/CLOCKS_PER_SEC);
 
     // Copy buffers to device
@@ -305,6 +332,10 @@ int main(int argc,char *argv[])
       fwrite(cbuf,sizeof(char),nread*nsub/ndec,outfile[idm]);
     }
     printf("Processed %d DMs in %.2f s\n",ndm,(float) (clock()-startclock)/CLOCKS_PER_SEC);
+
+    // Exit when we pass the read length limit
+    if (total_bytes_read > bytes_to_read)
+      break;
   }
 
   // Close files

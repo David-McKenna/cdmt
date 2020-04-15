@@ -10,16 +10,14 @@
 #include <helper_functions.h>
 #include <helper_cuda.h>
 #include <getopt.h>
+#include <limits.h>
 
 #define HEADERSIZE 4096
 #define DMCONSTANT 2.41e-10
 
-// sigproc code generates a lot of string literal errors; silence them.
-#pragma GCC diagnostic ignored "-Wwrite-strings"
-
 // Struct for header information
 struct header {
-  int nchan,nsamp,nbit,nsub;
+  int nchan,nsamp,nbit=0,nsub;
   double tstart,tsamp,fch1,foff,fcen,bwchan;
   double src_raj,src_dej;
   char source_name[80];
@@ -52,7 +50,9 @@ void usage()
   printf("-o <outputname>           Output filename [default: cdmt]\n");
   printf("-N <forward FFT size>     Forward FFT size [integer, default: 65536]\n");
   printf("-n <overlap region>       Overlap region [integer, default: 2048]\n");
-  printf("-s <sigproc header location>  Sigproc header to read metadata from [default: fil prefix.sigprochdr]\n");
+  printf("-s <bytes>       Number of bytes to skip in the filterbank before stating processing [integer, default: 0]\n");
+  printf("-r <bytes>       Number of bytes to read in total from the -s offset [integer, default: length of file]");
+  printf("-m <sigproc header location>  Sigproc header to read metadata from [default: fil prefix.sigprochdr]\n");
 
   return;
 }
@@ -74,46 +74,54 @@ int main(int argc,char *argv[])
   float *dm,*ddm,dm_start,dm_step;
   char fname[128],fheader[1024],*udpfname,sphdrfname[1024],obsid[128]="cdmt";
   int bytes_read;
+  long int total_bytes_read=0,bytes_to_read=LONG_MAX,bytes_skip=0;
   int part=0,device=0;
   int arg=0;
   FILE **outfile;
 
   // Read options
   if (argc>1) {
-    while ((arg=getopt(argc,argv,"d:D:ho:b:N:n:s:"))!=-1) {
+    while ((arg=getopt(argc,argv,"d:D:ho:b:N:n:s:r:m:"))!=-1) {
       switch (arg) {
-	
+  
       case 'n':
-	noverlap=atoi(optarg);
-	break;
+  noverlap=atoi(optarg);
+  break;
 
       case 'N':
-	nbin=atoi(optarg);
-	break;
+  nbin=atoi(optarg);
+  break;
 
       case 'b':
-	ndec=atoi(optarg);
-	break;
+  ndec=atoi(optarg);
+  break;
 
       case 'o':
-	strcpy(obsid,optarg);
-	break;
+  strcpy(obsid,optarg);
+  break;
 
       case 'D':
-	device=atoi(optarg);
-	break;
-	
+  device=atoi(optarg);
+  break;
+  
       case 'd':
   sscanf(optarg,"%f,%f,%d",&dm_start,&dm_step,&ndm);
   break;
 
-      case 's':
+      case 'm':
   strcpy(sphdrfname,optarg);
   break;
 
+      case 's':
+  bytes_skip=atol(optarg);
+  break;
+  
+      case 'r':
+  bytes_to_read=atol(optarg);
+  break;
       case 'h':
-	usage();
-	return 0;
+  usage();
+  return 0;
       }
     }
   } else {
@@ -141,6 +149,15 @@ int main(int argc,char *argv[])
   printf("src_dej: %lf\n", hdr.src_dej);
   printf("source: %s", hdr.source_name);
   printf("====HEADER INFORMATION====\n");
+
+  // Account for the difference in time in the new header if we skip bytes
+  if (bytes_skip) {
+    // Not initialised by default, putting this in encase read_h5_header is changed in future
+    if (hdr.nbit == 0)
+      hdr.nbit = 8;
+    // tstart = MJD, tsamp = seconds, 1 byte = 8 bits = 1 sample per file by default
+    hdr.tstart += (double) (bytes_skip * (8.0 / ((double) hdr.nbit))) * hdr.tsamp / 86400.0;
+  }
 
   // Read the number of subbands
   nsub=hdr.nsub;
@@ -255,6 +272,8 @@ int main(int argc,char *argv[])
   // Read files
   for (i=0;i<4;i++) {
     rawfile[i]=fopen(hdr.rawfname[i],"r");
+    if (bytes_skip > 0)
+      fseek(rawfile[i],bytes_skip,SEEK_SET);
   }
 
   // Loop over input file contents
@@ -265,6 +284,10 @@ int main(int argc,char *argv[])
       nread=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub;
     if (nread==0)
       break;
+
+    // Count up the total bytes read
+    total_bytes_read += nread;
+
     printf("Block: %d: Read %ld MB in %.2f s\n",iblock,sizeof(char)*nread*nsub*4/(1<<20),(float) (clock()-startclock)/CLOCKS_PER_SEC);
 
     // Copy buffers to device
@@ -323,9 +346,9 @@ int main(int argc,char *argv[])
       blocksize.x=32; blocksize.y=32; blocksize.z=1;
       gridsize.x=mchan/blocksize.x+1; gridsize.y=mblock/blocksize.y+1; gridsize.z=1;
       if (ndec==1)
-	redigitize<<<gridsize,blocksize>>>(dfbuf,mchan,mblock,msum,zavg,zstd,3.0,5.0,dcbuf);
+  redigitize<<<gridsize,blocksize>>>(dfbuf,mchan,mblock,msum,zavg,zstd,3.0,5.0,dcbuf);
       else
-	decimate_and_redigitize<<<gridsize,blocksize>>>(dfbuf,ndec,mchan,mblock,msum,zavg,zstd,3.0,5.0,dcbuf);      
+  decimate_and_redigitize<<<gridsize,blocksize>>>(dfbuf,ndec,mchan,mblock,msum,zavg,zstd,3.0,5.0,dcbuf);      
 
       // Copy buffer to host
       checkCudaErrors(cudaMemcpy(cbuf,dcbuf,sizeof(unsigned char)*msamp*mchan/ndec,cudaMemcpyDeviceToHost));
@@ -334,6 +357,10 @@ int main(int argc,char *argv[])
       fwrite(cbuf,sizeof(char),nread*nsub/ndec,outfile[idm]);
     }
     printf("Processed %d DMs in %.2f s\n",ndm,(float) (clock()-startclock)/CLOCKS_PER_SEC);
+
+    // Exit when we pass the read length limit
+    if (total_bytes_read > bytes_to_read)
+      break;
   }
 
   // Close files
@@ -769,7 +796,7 @@ __global__ void transpose_unpadd_and_detect(cufftComplex *cp1,cufftComplex *cp2,
       
       // Select data points from valid region
       if (ibin>=noverlap && ibin<=nbin-noverlap && isamp>=0 && isamp<nsamp)
-	fbuf[idx2]=cp1[idx1].x*cp1[idx1].x+cp1[idx1].y*cp1[idx1].y+cp2[idx1].x*cp2[idx1].x+cp2[idx1].y*cp2[idx1].y;
+  fbuf[idx2]=cp1[idx1].x*cp1[idx1].x+cp1[idx1].y*cp1[idx1].y+cp2[idx1].x*cp2[idx1].x+cp2[idx1].y*cp2[idx1].y;
     }
   }
 
@@ -948,8 +975,8 @@ __global__ void decimate_and_redigitize(float *z,int ndec,int nchan,int nblock,i
     for (isum=0;isum<nsum;isum+=ndec) {
       idx2=ichan+nchan*(isum/ndec+iblock*nsum/ndec);
       for (idec=0,ztmp=0.0;idec<ndec;idec++) {
-	idx1=ichan+nchan*(isum+idec+iblock*nsum);
-	ztmp+=z[idx1];
+  idx1=ichan+nchan*(isum+idec+iblock*nsum);
+  ztmp+=z[idx1];
       }
       ztmp/=(float) ndec;
       ztmp-=zoffset;
