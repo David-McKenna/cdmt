@@ -45,7 +45,7 @@ void write_filterbank_header(struct header h,FILE *file);
 // Usage
 void usage()
 {
-  printf("cdmt -P <part> -d <DM start,step,num> -D <GPU device> -b <ndec> -N <forward FFT size> -n <overlap region> -o <outputname> <file.h5> -s <bytes to skip> -r <bytes to read>\n\n");
+  printf("cdmt -P <part> -d <DM start,step,num> -D <GPU device> -b <ndec> -N <forward FFT size> -n <overlap region> -o <outputname> <file.h5> -s <time samples to skip> -r <time samples to read>\n\n");
   printf("Compute coherently dedispersed SIGPROC filterbank files from LOFAR complex voltage data in HDF5 format.\n");
   printf("-P <part>        Specify part number for input file [integer, default: 0]\n");
   printf("-D <GPU device>  Select GPU device [integer, default: 0]\n");
@@ -54,8 +54,8 @@ void usage()
   printf("-o <outputname>           Output filename [default: cdmt]\n");
   printf("-N <forward FFT size>     Forward FFT size [integer, default: 65536]\n");
   printf("-n <overlap region>       Overlap region [integer, default: 2048]\n");
-  printf("-s <bytes>       Number of bytes to skip in the filterbank before stating processing [integer, default: 0]\n");
-  printf("-r <bytes>       Number of bytes to read in total from the -s offset [integer, default: length of file]");
+  printf("-s <bytes>       Number of time samples to skip in the filterbank before stating processing (using input time resolution) [integer, default: 0]\n");
+  printf("-r <bytes>       Number of time samples to read in total from the -s offset (using input time resolution) [integer, default: length of file]");
 
   return;
 }
@@ -77,7 +77,7 @@ int main(int argc,char *argv[])
   clock_t startclock;
   float *dm,*ddm,dm_start,dm_step;
   char fname[128],fheader[1024],*h5fname,obsid[128]="cdmt";
-  int bytes_read;
+  long int ts_read=-1, ts_skip=0;
   long int total_bytes_read=0,bytes_to_read=LONG_MAX,bytes_skip=0;
   int part=0,device=0;
   int arg=0;
@@ -113,11 +113,11 @@ int main(int argc,char *argv[])
   break;
 
       case 's':
-  bytes_skip=atol(optarg);
+  ts_skip=atol(optarg);
   break;
   
       case 'r':
-  bytes_to_read=atol(optarg);
+  ts_read=atol(optarg);
   break;
   
       case 'd':
@@ -138,13 +138,24 @@ int main(int argc,char *argv[])
   // Read HDF5 header
   h5=read_h5_header(h5fname);
 
-  // Account for the difference in time in the new header if we skip bytes
-  if (bytes_skip) {
+
+  // Handle skip/read flags
+  if (ts_read > 0) {
     // Not initialised by default, putting this in encase read_h5_header is changed in future
     if (h5.nbit == 0)
       h5.nbit = 8;
-    // tstart = MJD, tsamp = seconds, 1 byte = 8 bits = 1 sample per file by default
-    h5.tstart += (double) (bytes_skip * (8.0 / ((double) h5.nbit))) * h5.tsamp / 86400.0;
+    // Float nsub to try account for sub-8-bit case, if ever used
+    bytes_to_read = ts_read * (long int) ((float) h5.nbit * (float) h5.nsub / 8.0);
+  }
+
+  
+  if (ts_skip > 0) {
+    // Not initialised by default, putting this in encase read_h5_header is changed in future
+    if (h5.nbit == 0)
+      h5.nbit = 8;
+    bytes_skip = (long int) (ts_skip * (float) h5.nsub * (float) h5.nbit / 8.0);
+    // Account for the difference in time in the new header if we skip bytes    // tstart = MJD, tsamp = seconds, 1 byte = 8 bits = 1 sample per file by default
+    h5.tstart += (double) ts_skip * h5.tsamp / 86400.0;
   }
 
 

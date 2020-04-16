@@ -73,7 +73,7 @@ int main(int argc,char *argv[])
   clock_t startclock;
   float *dm,*ddm,dm_start,dm_step;
   char fname[128],fheader[1024],*udpfname,sphdrfname[1024],obsid[128]="cdmt";
-  int bytes_read;
+  long int ts_read=-1, ts_skip=0;
   long int total_bytes_read=0,bytes_to_read=LONG_MAX,bytes_skip=0;
   int part=0,device=0;
   int arg=0;
@@ -113,11 +113,11 @@ int main(int argc,char *argv[])
   break;
 
       case 's':
-  bytes_skip=atol(optarg);
+  ts_skip=atol(optarg);
   break;
   
       case 'r':
-  bytes_to_read=atol(optarg);
+  ts_read=atol(optarg);
   break;
       case 'h':
   usage();
@@ -150,13 +150,23 @@ int main(int argc,char *argv[])
   printf("source: %s", hdr.source_name);
   printf("====HEADER INFORMATION====\n");
 
-  // Account for the difference in time in the new header if we skip bytes
-  if (bytes_skip) {
-    // Not initialised by default, putting this in encase read_h5_header is changed in future
+  // Handle skip/read flags
+  if (ts_read > 0) {
+    // If it's initialised by default...
     if (hdr.nbit == 0)
       hdr.nbit = 8;
-    // tstart = MJD, tsamp = seconds, 1 byte = 8 bits = 1 sample per file by default
-    hdr.tstart += (double) (bytes_skip * (8.0 / ((double) hdr.nbit))) * hdr.tsamp / 86400.0;
+    // Float nsub to try account for sub-8-bit case, if ever used
+    bytes_to_read = ts_read * (long int) ((float) hdr.nbit * (float) hdr.nsub / 8.0);
+  }
+
+  
+  if (ts_skip > 0) {
+    // If it's initialised by default...
+    if (hdr.nbit == 0)
+      hdr.nbit = 8;
+    bytes_skip = (long int) (ts_skip * (float) hdr.nsub * (float) hdr.nbit / 8.0);
+    // Account for the difference in time in the new header if we skip bytes    // tstart = MJD, tsamp = seconds, 1 byte = 8 bits = 1 sample per file by default
+    hdr.tstart += (double) ts_skip * hdr.tsamp / 86400.0;
   }
 
   // Read the number of subbands
