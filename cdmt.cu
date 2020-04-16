@@ -77,6 +77,7 @@ int main(int argc,char *argv[])
   clock_t startclock;
   float *dm,*ddm,dm_start,dm_step;
   char fname[128],fheader[1024],*h5fname,obsid[128]="cdmt";
+  int bytes_read;
   long int ts_read=-1, ts_skip=0;
   long int total_bytes_read=0,bytes_to_read=LONG_MAX,bytes_skip=0;
   int part=0,device=0;
