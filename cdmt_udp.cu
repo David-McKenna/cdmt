@@ -51,7 +51,7 @@ void usage()
   printf("-N <forward FFT size>     Forward FFT size [integer, default: 65536]\n");
   printf("-n <overlap region>       Overlap region [integer, default: 2048]\n");
   printf("-s <bytes>       Number of bytes to skip in the filterbank before stating processing [integer, default: 0]\n");
-  printf("-r <bytes>       Number of bytes to read in total from the -s offset [integer, default: length of file]");
+  printf("-r <bytes>       Number of bytes to read in total from the -s offset [integer, default: length of file]\n");
   printf("-m <sigproc header location>  Sigproc header to read metadata from [default: fil prefix.sigprochdr]\n");
 
   return;
