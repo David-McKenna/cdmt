@@ -74,8 +74,8 @@ int main(int argc,char *argv[])
   float *dm,*ddm,dm_start,dm_step;
   char fname[128],fheader[1024],*udpfname,sphdrfname[1024],obsid[128]="cdmt";
   int bytes_read;
-  long int ts_read=-1, ts_skip=0;
-  long int total_bytes_read=0,bytes_to_read=LONG_MAX,bytes_skip=0;
+  long int ts_read=LONG_MAX,ts_skip=0;
+  long int total_ts_read=0,bytes_skip=0;
   int part=0,device=0;
   int arg=0;
   FILE **outfile;
@@ -151,16 +151,7 @@ int main(int argc,char *argv[])
   printf("source: %s", hdr.source_name);
   printf("====HEADER INFORMATION====\n");
 
-  // Handle skip/read flags
-  if (ts_read > 0) {
-    // If it's initialised by default...
-    if (hdr.nbit == 0)
-      hdr.nbit = 8;
-    // Float nsub to try account for sub-8-bit case, if ever used
-    bytes_to_read = ts_read * (long int) ((float) hdr.nbit * (float) hdr.nsub / 8.0);
-  }
-
-  
+  // Handle skip flag
   if (ts_skip > 0) {
     // If it's initialised by default...
     if (hdr.nbit == 0)
@@ -297,7 +288,7 @@ int main(int argc,char *argv[])
       break;
 
     // Count up the total bytes read
-    total_bytes_read += nread;
+    total_ts_read += nread;
 
     printf("Block: %d: Read %ld MB in %.2f s\n",iblock,sizeof(char)*nread*nsub*4/(1<<20),(float) (clock()-startclock)/CLOCKS_PER_SEC);
 
@@ -370,7 +361,7 @@ int main(int argc,char *argv[])
     printf("Processed %d DMs in %.2f s\n",ndm,(float) (clock()-startclock)/CLOCKS_PER_SEC);
 
     // Exit when we pass the read length limit
-    if (total_bytes_read > bytes_to_read)
+    if (total_ts_read > ts_read)
       break;
   }
 
