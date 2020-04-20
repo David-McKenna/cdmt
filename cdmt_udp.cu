@@ -131,6 +131,23 @@ int main(int argc,char *argv[])
   }
   udpfname=argv[optind];
 
+
+  // Sanity checks to avoid voids in output filterbank
+  if (nbin % 8 != 0) {
+    fprintf(stderr, "ERROR: nbin must be disible by 8 (currently %d, remainder %d). Exiting.\n", nbin, nbin % 8);
+    exit(1);
+  }
+  if ( (128 * (nbin-2*noverlap)) % 8 != 0 ) {
+    fprintf(stderr, "ERROR: Valid data length must be divisible by 8 (currently %d, remainer %d). Exiting.", nbin-2*noverlap, (nbin-2*noverlap) % 8);
+    exit(1);
+  }
+
+  if ((128 * (nbin-2*noverlap) / 8) % 1024 != 0) {
+    fprintf(stderr, "ERROR: Interal sum cannot proceed; valid samples must be divisible by 1024 (currently %d, remainder %d). Exiting.\n", (128 * (nbin-2*noverlap) / 8), (128 * (nbin-2*noverlap) / 8) % 1024);
+    exit(1);
+  }
+  
+
   if (strlen(sphdrfname) < 2) {
     sprintf(sphdrfname, "%s.sigprochdr", udpfname);
   }
@@ -138,7 +155,7 @@ int main(int argc,char *argv[])
   // Read sigproc header
   struct header hdr = read_sigproc_header(sphdrfname, udpfname);
 
-  printf("====HEADER INFORMATION====\n");
+  printf("====ORIGINAL HEADER INFORMATION====\n");
   printf("nsub: %d, nsamp: %d, nbit: %d, nchan %d\n", hdr.nsub, hdr.nsamp, hdr.nbit, hdr.nchan);
   printf("tstart: %lf\n", hdr.tstart);
   printf("tsamp: %lf\n", hdr.tsamp);
@@ -148,8 +165,8 @@ int main(int argc,char *argv[])
   printf("bwchan: %lf\n", hdr.bwchan);
   printf("src_raj: %lf\n", hdr.src_raj);
   printf("src_dej: %lf\n", hdr.src_dej);
-  printf("source: %s", hdr.source_name);
-  printf("====HEADER INFORMATION====\n");
+  printf("source: %s\n", hdr.source_name);
+  printf("====ORIGINAL HEADER INFORMATION====\n");
 
   // Handle skip flag
   if (ts_skip > 0) {
@@ -172,7 +189,7 @@ int main(int argc,char *argv[])
   hdr.foff=-fabs(hdr.bwchan/nchan);
 
 
-  printf("====HEADER INFORMATION====\n");
+  printf("====NEW HEADER INFORMATION====\n");
   printf("nsub: %d, nsamp: %d, nbit: %d, nchan %d\n", hdr.nsub, hdr.nsamp, hdr.nbit, hdr.nchan);
   printf("tstart: %lf\n", hdr.tstart);
   printf("tsamp: %lf\n", hdr.tsamp);
@@ -182,22 +199,38 @@ int main(int argc,char *argv[])
   printf("bwchan: %lf\n", hdr.bwchan);
   printf("src_raj: %lf\n", hdr.src_raj);
   printf("src_dej: %lf\n", hdr.src_dej);
-  printf("source: %s", hdr.source_name);
-  printf("====HEADER INFORMATION====\n");
+  printf("source: %s\n", hdr.source_name);
+  printf("====NEW HEADER INFORMATION====\n");
 
   // Data size
   nvalid=nbin-2*noverlap;
-  nsamp=100*nvalid;
+  nsamp=128*nvalid;
   nfft=(int) ceil(nsamp/(float) nvalid);
-  mbin=nbin/nchan;
+  mbin=nbin/nchan; // nbin must be evenly divisible by 8
   mchan=nsub*nchan;
-  msamp=nsamp/nchan;
-  mblock=msamp/msum;
+  msamp=nsamp/nchan; // 128 * nvalid must be divisble by 8
+  mblock=msamp/msum; // 128 * nvalid / 8 must be disible by 1024
 
   printf("nbin: %d nfft: %d nsub: %d mbin: %d nchan: %d nsamp: %d nvalid: %d\n",nbin,nfft,nsub,mbin,nchan,nsamp,nvalid);
+  printf("msamp: %d mblock: %d mchan: %d\n", msamp, mblock, mchan);
 
   // Set device
   checkCudaErrors(cudaSetDevice(device));
+
+  // DMcK: cuFFT docs say it's best practice to plan before allocating memory
+  // cuda-memcheck fails initialisation before this block is run?
+  // Generate FFT plan (batch in-place forward FFT)
+  printf("Init #0\n");
+  idist=nbin;  odist=nbin;  iembed=nbin;  oembed=nbin;  istride=1;  ostride=1;
+  checkCudaErrors(cufftPlanMany(&ftc2cf,1,&nbin,&iembed,istride,idist,&oembed,ostride,odist,CUFFT_C2C,nfft*nsub));
+  printf("Init #1\n");
+  cudaDeviceSynchronize();
+
+  // Generate FFT plan (batch in-place backward FFT)
+  idist=mbin;  odist=mbin;  iembed=mbin;  oembed=mbin;  istride=1;  ostride=1;
+  checkCudaErrors(cufftPlanMany(&ftc2cb,1,&mbin,&iembed,istride,idist,&oembed,ostride,odist,CUFFT_C2C,nchan*nfft*nsub));
+  printf("Init #2\n");
+  cudaDeviceSynchronize();
 
   // Allocate memory for complex timeseries
   checkCudaErrors(cudaMalloc((void **) &cp1,  (size_t) sizeof(cufftComplex)*nbin*nfft*nsub));
@@ -235,14 +268,7 @@ int main(int argc,char *argv[])
     dm[idm]=dm_start+(float) idm*dm_step;
   checkCudaErrors(cudaMalloc((void **) &ddm, (size_t) sizeof(float)*ndm));
   checkCudaErrors(cudaMemcpy(ddm,dm,sizeof(float)*ndm,cudaMemcpyHostToDevice));
-
-  // Generate FFT plan (batch in-place forward FFT)
-  idist=nbin;  odist=nbin;  iembed=nbin;  oembed=nbin;  istride=1;  ostride=1;
-  checkCudaErrors(cufftPlanMany(&ftc2cf,1,&nbin,&iembed,istride,idist,&oembed,ostride,odist,CUFFT_C2C,nfft*nsub));
-
-  // Generate FFT plan (batch in-place backward FFT)
-  idist=mbin;  odist=mbin;  iembed=mbin;  oembed=mbin;  istride=1;  ostride=1;
-  checkCudaErrors(cufftPlanMany(&ftc2cb,1,&mbin,&iembed,istride,idist,&oembed,ostride,odist,CUFFT_C2C,nchan*nfft*nsub));
+  cudaDeviceSynchronize();
 
   // Compute chirp
   blocksize.x=32; blocksize.y=32; blocksize.z=1;
@@ -282,8 +308,10 @@ int main(int argc,char *argv[])
   for (iblock=0;;iblock++) {
     // Read block
     startclock=clock();
-    for (i=0;i<4;i++)
+    for (i=0;i<4;i++) {
+      printf("%d, %d: %ld, %d\n", iblock, i, ftell(rawfile[i]), nsamp);
       nread=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub;
+    }
     if (nread==0)
       break;
 

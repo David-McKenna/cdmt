@@ -135,10 +135,37 @@ int main(int argc,char *argv[])
     return 0;
   }
   h5fname=argv[optind];
+
+  // Sanity checks to avoid voids in output filterbank
+  if (nbin % 8 != 0) {
+    fprintf(stderr, "ERROR: nbin must be disible by 8 (currently %d, remainder %d). Exiting.\n", nbin, nbin % 8);
+    exit(1);
+  }
+  if ( (128 * (nbin-2*noverlap)) % 8 != 0 ) {
+    fprintf(stderr, "ERROR: Valid data length must be divisible by 8 (currently %d, remainer %d). Exiting.", nbin-2*noverlap, (nbin-2*noverlap) % 8);
+    exit(1);
+  }
+
+  if ((128 * (nbin-2*noverlap) / 8) % 1024 != 0) {
+    fprintf(stderr, "ERROR: Interal sum cannot proceed; valid samples must be divisible by 1024 (currently %d, remainder %d). Exiting.\n", (128 * (nbin-2*noverlap) / 8), (128 * (nbin-2*noverlap) / 8) % 1024);
+    exit(1);
+  }
   
   // Read HDF5 header
   h5=read_h5_header(h5fname);
 
+  printf("====ORIGINAL HEADER INFORMATION====\n");
+  printf("nsub: %d, nsamp: %d, nbit: %d, nchan %d\n", h5.nsub, h5.nsamp, h5.nbit, h5.nchan);
+  printf("tstart: %lf\n", h5.tstart);
+  printf("tsamp: %lf\n", h5.tsamp);
+  printf("fch1: %lf\n", h5.fch1);
+  printf("foff: %lf\n", h5.foff);
+  printf("fcen: %lf\n", h5.fcen);
+  printf("bwchan: %lf\n", h5.bwchan);
+  printf("src_raj: %lf\n", h5.src_raj);
+  printf("src_dej: %lf\n", h5.src_dej);
+  printf("source: %s", h5.source_name);
+  printf("====ORIGINAL HEADER INFORMATION====\n");
 
   // Handle skip flag
   if (ts_skip > 0) {
@@ -163,14 +190,28 @@ int main(int argc,char *argv[])
 
   // Data size
   nvalid=nbin-2*noverlap;
-  nsamp=100*nvalid;
+  nsamp=128*nvalid;
   nfft=(int) ceil(nsamp/(float) nvalid);
   mbin=nbin/nchan;
   mchan=nsub*nchan;
   msamp=nsamp/nchan;
   mblock=msamp/msum;
 
+  printf("====NEW HEADER INFORMATION====\n");
+  printf("nsub: %d, nsamp: %d, nbit: %d, nchan %d\n", h5.nsub, h5.nsamp, h5.nbit, h5.nchan);
+  printf("tstart: %lf\n", h5.tstart);
+  printf("tsamp: %lf\n", h5.tsamp);
+  printf("fch1: %lf\n", h5.fch1);
+  printf("foff: %lf\n", h5.foff);
+  printf("fcen: %lf\n", h5.fcen);
+  printf("bwchan: %lf\n", h5.bwchan);
+  printf("src_raj: %lf\n", h5.src_raj);
+  printf("src_dej: %lf\n", h5.src_dej);
+  printf("source: %s", h5.source_name);
+  printf("====NEW HEADER INFORMATION====\n");
+
   printf("nbin: %d nfft: %d nsub: %d mbin: %d nchan: %d nsamp: %d nvalid: %d\n",nbin,nfft,nsub,mbin,nchan,nsamp,nvalid);
+  printf("msamp: %d mblock: %d mchan: %d\n", msamp, mblock, mchan);
 
   // Set device
   checkCudaErrors(cudaSetDevice(device));
