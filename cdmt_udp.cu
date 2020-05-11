@@ -34,15 +34,16 @@ __global__ void unpack_and_padd(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,
 __global__ void swap_spectrum_halves(cufftComplex *cp1,cufftComplex *cp2,int nx,int ny);
 __global__ void compute_chirp(double fcen,double bw,float *dm,int nchan,int nbin,int nsub,int ndm,cufftComplex *c);
 __global__ void compute_block_sums(float *z,int nchan,int nblock,int nsum,float *bs1,float *bs2);
-__global__ void compute_channel_statistics(int nchan,int nblock,int nsum,float *bs1,float *bs2,float *zavg,float *zstd);
-__global__ void redigitize(float *z,int nchan,int nblock,int nsum,float *zavg,float *zstd,float zmin,float zmax,unsigned char *cz);
-__global__ void decimate_and_redigitize(float *z,int ndec,int nchan,int nblock,int nsum,float *zavg,float *zstd,float zmin,float zmax,unsigned char *cz);
+__global__ void compute_channel_statistics(int nchan,int nblock,int nsum,float *bs1,float *bs2,int calibrate,int calchan0,int calchan1,float *zavg,float *zstd);
+__global__ void propogate_channel_statistics(int nchan, int calchan0, int calchan1, float *zavg, float *zstd);
+__global__ void redigitize(float *z,int nchan,int nblock,int nsum,float *zavg,float *zstd,float zmin,float zmax,int calibrate,unsigned char *cz);
+__global__ void decimate_and_redigitize(float *z,int ndec,int nchan,int nblock,int nsum,float *zavg,float *zstd,float zmin,float zmax,int calibrate,unsigned char *cz);
 void write_filterbank_header(struct header h,FILE *file);
 
 // Usage
 void usage()
 {
-  printf("cdmt -d <DM start,step,num> -D <GPU device> -b <ndec> -N <forward FFT size> -n <overlap region> -o <outputname> -s <sigproc header location> <fil prefix>\n\n");
+  printf("cdmt -d <DM start,step,num> -D <GPU device> -b <ndec> -N <forward FFT size> -n <overlap region> -o <outputname> -c -s <sigproc header location> <fil prefix>\n\n");
   printf("Compute coherently dedispersed SIGPROC filterbank files from LOFAR complex voltage data in raw udp format.\n");
   printf("-D <GPU device>  Select GPU device [integer, default: 0]\n");
   printf("-b <ndec>        Number of time samples to average [integer, default: 1]\n");
@@ -126,6 +127,7 @@ int main(int argc,char *argv[])
       }
     }
   } else {
+    printf("Unknown option '%c'\n", arg);
     usage();
     return 0;
   }
@@ -143,12 +145,14 @@ int main(int argc,char *argv[])
   }
 
   if ((128 * (nbin-2*noverlap) / 8) % 1024 != 0) {
-    fprintf(stderr, "ERROR: Interal sum cannot proceed; valid samples must be divisible by 1024 (currently %d, remainder %d). Exiting.\n", (128 * (nbin-2*noverlap) / 8), (128 * (nbin-2*noverlap) / 8) % 1024);
+    fprintf(stderr, "ERROR: Interal sum cannot proceed; valid samples must be divisible by 1024 (currently %d, remainder %d).\n", (128 * (nbin-2*noverlap) / 8), (128 * (nbin-2*noverlap) / 8) % 1024);
+    fprintf(stderr, "Consider using %d or %d as your forward FFT size next time. Exiting.\n", 64 * ((128 * (nbin-2*noverlap) / 8) - (128 * (nbin-2*noverlap) / 8) % 1024) / 1024 + 2 * noverlap,
+                                                                                   64 * ((128 * (nbin-2*noverlap) / 8) + (1024  - (128 * (nbin-2*noverlap) / 8) % 1024)) / 1024 + 2 * noverlap);
     exit(1);
   }
   
 
-  if (strlen(sphdrfname) < 2) {
+  if (strcmp(sphdrfname, "") == 0) {
     sprintf(sphdrfname, "%s.sigprochdr", udpfname);
   }
   
@@ -158,7 +162,7 @@ int main(int argc,char *argv[])
   printf("====ORIGINAL HEADER INFORMATION====\n");
   printf("nsub: %d, nsamp: %d, nbit: %d, nchan %d\n", hdr.nsub, hdr.nsamp, hdr.nbit, hdr.nchan);
   printf("tstart: %lf\n", hdr.tstart);
-  printf("tsamp: %lf\n", hdr.tsamp);
+  printf("tsamp: %.08lf\n", hdr.tsamp);
   printf("fch1: %lf\n", hdr.fch1);
   printf("foff: %lf\n", hdr.foff);
   printf("fcen: %lf\n", hdr.fcen);
@@ -192,7 +196,7 @@ int main(int argc,char *argv[])
   printf("====NEW HEADER INFORMATION====\n");
   printf("nsub: %d, nsamp: %d, nbit: %d, nchan %d\n", hdr.nsub, hdr.nsamp, hdr.nbit, hdr.nchan);
   printf("tstart: %lf\n", hdr.tstart);
-  printf("tsamp: %lf\n", hdr.tsamp);
+  printf("tsamp: %.08lf\n", hdr.tsamp);
   printf("fch1: %lf\n", hdr.fch1);
   printf("foff: %lf\n", hdr.foff);
   printf("fcen: %lf\n", hdr.fcen);
@@ -220,16 +224,13 @@ int main(int argc,char *argv[])
   // DMcK: cuFFT docs say it's best practice to plan before allocating memory
   // cuda-memcheck fails initialisation before this block is run?
   // Generate FFT plan (batch in-place forward FFT)
-  printf("Init #0\n");
   idist=nbin;  odist=nbin;  iembed=nbin;  oembed=nbin;  istride=1;  ostride=1;
   checkCudaErrors(cufftPlanMany(&ftc2cf,1,&nbin,&iembed,istride,idist,&oembed,ostride,odist,CUFFT_C2C,nfft*nsub));
-  printf("Init #1\n");
   cudaDeviceSynchronize();
 
   // Generate FFT plan (batch in-place backward FFT)
   idist=mbin;  odist=mbin;  iembed=mbin;  oembed=mbin;  istride=1;  ostride=1;
   checkCudaErrors(cufftPlanMany(&ftc2cb,1,&mbin,&iembed,istride,idist,&oembed,ostride,odist,CUFFT_C2C,nchan*nfft*nsub));
-  printf("Init #2\n");
   cudaDeviceSynchronize();
 
   // Allocate memory for complex timeseries
@@ -268,6 +269,8 @@ int main(int argc,char *argv[])
     dm[idm]=dm_start+(float) idm*dm_step;
   checkCudaErrors(cudaMalloc((void **) &ddm, (size_t) sizeof(float)*ndm));
   checkCudaErrors(cudaMemcpy(ddm,dm,sizeof(float)*ndm,cudaMemcpyHostToDevice));
+
+  // Allow memory alloation/copy actions to finish before processing
   cudaDeviceSynchronize();
 
   // Compute chirp
@@ -277,9 +280,17 @@ int main(int argc,char *argv[])
 
   // Write temporary filterbank header
   file=fopen("/tmp/header.fil","w");
+  if (file == NULL) {
+    fprintf(stderr, "ERROR: Unable to open /tmp/header.fil to write temporary header; exiting.\n");
+    exit(1);
+  }
   write_filterbank_header(hdr,file);
   fclose(file);
   file=fopen("/tmp/header.fil","r");
+  if (file == NULL) {
+    fprintf(stderr, "ERROR: Unable to re-open /tmp/header.fil to read temporary header length; exiting.\n");
+    exit(1);
+  }
   bytes_read=fread(fheader,sizeof(char),1024,file);
   fclose(file);
   
@@ -289,6 +300,10 @@ int main(int argc,char *argv[])
     sprintf(fname,"%s_cDM%06.2f_P%03d.fil",obsid,dm[idm],part);
 
     outfile[idm]=fopen(fname,"w");
+    if (outfile[idm] == NULL) {
+      fprintf(stderr, "Unable to open output file %s, exiting.\n", fname);
+      exit(1);
+    }
   }
   
   // Write headers
@@ -308,15 +323,15 @@ int main(int argc,char *argv[])
   for (iblock=0;;iblock++) {
     // Read block
     startclock=clock();
-    for (i=0;i<4;i++) {
-      printf("%d, %d: %ld, %d\n", iblock, i, ftell(rawfile[i]), nsamp);
+    for (i=0;i<4;i++)
       nread=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub;
-    }
-    if (nread==0)
+    if (nread==0) {
+      printf("No data read from last file; assuming EOF, finishng up.\n");
       break;
+    }
 
     // Count up the total bytes read
-    total_ts_read += nread;
+    total_ts_read += nread * nsub;
 
     printf("Block: %d: Read %ld MB in %.2f s\n",iblock,sizeof(char)*nread*nsub*4/(1<<20),(float) (clock()-startclock)/CLOCKS_PER_SEC);
 
@@ -616,6 +631,10 @@ struct header read_sigproc_header(char *fname, char *dataname)
   FILE *tmpf;
 
   tmpf = fopen(fname, "r");
+  if (tmpf == NULL) {
+    fprintf(stderr, "Unable to open sigproc header at %s; exiting.\n", fname);
+    exit(1);
+  }
   struct header hdr = read_header(tmpf);
   fclose(tmpf);
 
@@ -750,17 +769,16 @@ __global__ void unpack_and_padd(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,
     idx1=ibin+nbin*isub+nsub*nbin*ifft;
     isamp=ibin+(nbin-2*noverlap)*ifft-noverlap;
     idx2=isub+nsub*isamp;
-    if (isamp<0 || isamp>=nsamp) {
-      cp1[idx1].x=0.0;
-      cp1[idx1].y=0.0;
-      cp2[idx1].x=0.0;
-      cp2[idx1].y=0.0;
-    } else {
-      cp1[idx1].x=(float) dbuf0[idx2];
-      cp1[idx1].y=(float) dbuf1[idx2];
-      cp2[idx1].x=(float) dbuf2[idx2];
-      cp2[idx1].y=(float) dbuf3[idx2];
-    }
+    if (isamp<0) {
+      idx2 *= -1;
+    } else if (isamp>=nsamp) {
+      idx2 -= 2 * (isamp - nsamp + 1) * nsub;
+    } 
+
+    cp1[idx1].x=(float) dbuf0[idx2];
+    cp1[idx1].y=(float) dbuf1[idx2];
+    cp2[idx1].x=(float) dbuf2[idx2];
+    cp2[idx1].y=(float) dbuf3[idx2];
   }
 
   return;

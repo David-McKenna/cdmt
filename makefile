@@ -2,14 +2,14 @@
 CUDAPATH = /usr/lib/cuda/
 
 # Compiling flags
-CFLAGS = -I./cuda-samples/Common
+CFLAGS = -I./cuda-samples/Common -I/usr/include/hdf5/serial/
 
 # Linking flags
 LFLAGS = -lm -L$(CUDAPATH)/lib64 -lcufft -lhdf5 -lcurand
 LFLAGS_udp = -lm -L$(CUDAPATH)/lib64 -L./cuda-samples/Common -lcufft -lcurand
 
 # Compilers
-NVCC = $(CUDAPATH)/bin/nvcc
+NVCC = $(CUDAPATH)/bin/nvcc -arch=sm_70 -O3 --use_fast_math
 CC = gcc
 
 cdmt: git cdmt.o
