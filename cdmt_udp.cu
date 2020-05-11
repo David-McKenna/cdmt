@@ -54,6 +54,8 @@ void usage()
   printf("-s <bytes>       Number of bytes to skip in the filterbank before stating processing [integer, default: 0]\n");
   printf("-r <bytes>       Number of bytes to read in total from the -s offset [integer, default: length of file]\n");
   printf("-m <sigproc header location>  Sigproc header to read metadata from [default: fil prefix.sigprochdr]\n");
+  printf("-c <mode 0/1/2>           Select a calibration mode before digitization occurs (defualt: 2)\n");
+  printf("   0: No calibration\t\t1: Calibration by averaging values between channelstart,channelend (1,c0,c1)\t\t2: Bandpass calibration\n");
 
   return;
 }
@@ -73,19 +75,29 @@ int main(int argc,char *argv[])
   dim3 blocksize,gridsize;
   clock_t startclock;
   float *dm,*ddm,dm_start,dm_step;
-  char fname[128],fheader[1024],*udpfname,sphdrfname[1024],obsid[128]="cdmt";
+  char fname[128],fheader[1024],*udpfname,sphdrfname[1024]="",obsid[128]="cdmt";
   int bytes_read;
   long int ts_read=LONG_MAX,ts_skip=0;
   long int total_ts_read=0,bytes_skip=0;
   int part=0,device=0;
   int arg=0;
+  int calibrate=2,calchan0=0,calchan1=0;
   FILE **outfile;
 
   // Read options
   if (argc>1) {
-    while ((arg=getopt(argc,argv,"d:D:ho:b:N:n:s:r:m:"))!=-1) {
+    while ((arg=getopt(argc,argv,"c:d:D:ho:b:N:n:s:r:m:"))!=-1) {
       switch (arg) {
   
+      case 'c':
+      sscanf(optarg,"%d,%d,%d",&calibrate,&calchan0,&calchan1);
+      printf("Calibrating in mode %d", calibrate);
+      if (calibrate == 1) {
+        printf(" from channel %d to %d", calchan0, calchan1);
+      }
+      printf(".\n");
+      break;
+
       case 'n':
   noverlap=atoi(optarg);
   break;
@@ -385,15 +397,15 @@ int main(int argc,char *argv[])
       // Compute channel stats
       blocksize.x=32; blocksize.y=1; blocksize.z=1;
       gridsize.x=mchan/blocksize.x+1; gridsize.y=1; gridsize.z=1;
-      compute_channel_statistics<<<gridsize,blocksize>>>(mchan,mblock,msum,bs1,bs2,zavg,zstd);
-
+      if (calibrate) compute_channel_statistics<<<gridsize,blocksize>>>(mchan,mblock,msum,bs1,bs2,calibrate,calchan0,calchan1,zavg,zstd);
+      if (calibrate==1) propogate_channel_statistics<<<1,32>>>(mchan,calchan0,calchan1,zavg,zstd);
       // Redigitize data to 8bits
       blocksize.x=32; blocksize.y=32; blocksize.z=1;
       gridsize.x=mchan/blocksize.x+1; gridsize.y=mblock/blocksize.y+1; gridsize.z=1;
       if (ndec==1)
-  redigitize<<<gridsize,blocksize>>>(dfbuf,mchan,mblock,msum,zavg,zstd,3.0,5.0,dcbuf);
+  redigitize<<<gridsize,blocksize>>>(dfbuf,mchan,mblock,msum,zavg,zstd,3.0,5.0,calibrate,dcbuf);
       else
-  decimate_and_redigitize<<<gridsize,blocksize>>>(dfbuf,ndec,mchan,mblock,msum,zavg,zstd,3.0,5.0,dcbuf);      
+  decimate_and_redigitize<<<gridsize,blocksize>>>(dfbuf,ndec,mchan,mblock,msum,zavg,zstd,3.0,5.0,calibrate,dcbuf);      
 
       // Copy buffer to host
       checkCudaErrors(cudaMemcpy(cbuf,dcbuf,sizeof(unsigned char)*msamp*mchan/ndec,cudaMemcpyDeviceToHost));
@@ -961,30 +973,85 @@ __global__ void compute_block_sums(float *z,int nchan,int nblock,int nsum,float 
 }
 
 // Compute segmented sums for later computation of offset and scale
-__global__ void compute_channel_statistics(int nchan,int nblock,int nsum,float *bs1,float *bs2,float *zavg,float *zstd)
+__global__ void compute_channel_statistics(int nchan,int nblock,int nsum,float *bs1,float *bs2,int calibrate,int calchan0,int calchan1,float *zavg,float *zstd)
 {
   int64_t ichan,iblock,idx1;
   double s1,s2;
 
   ichan=blockIdx.x*blockDim.x+threadIdx.x;
-  if (ichan<nchan) {
-    s1=0.0;
-    s2=0.0;
-    for (iblock=0;iblock<nblock;iblock++) {
-      idx1=ichan+nchan*iblock;
-      s1+=bs1[idx1];
-      s2+=bs2[idx1];
+  if (calibrate == 1) {
+    if (ichan<calchan1 && ichan>calchan0) {
+      s1=0.0;
+      s2=0.0;
+      for (iblock=0;iblock<nblock;iblock++) {
+        idx1=ichan+nchan*iblock;
+        s1+=bs1[idx1];
+        s2+=bs2[idx1];
+      }
+      zavg[ichan]=s1/(float) (nblock*nsum);
+      zstd[ichan]=s2/(float) (nblock*nsum)-zavg[ichan]*zavg[ichan];
+      zstd[ichan]=sqrt(zstd[ichan]);
     }
-    zavg[ichan]=s1/(float) (nblock*nsum);
-    zstd[ichan]=s2/(float) (nblock*nsum)-zavg[ichan]*zavg[ichan];
-    zstd[ichan]=sqrt(zstd[ichan]);
+  } else {
+    if (ichan<nchan) {
+      s1=0.0;
+      s2=0.0;
+      for (iblock=0;iblock<nblock;iblock++) {
+        idx1=ichan+nchan*iblock;
+        s1+=bs1[idx1];
+        s2+=bs2[idx1];
+      }
+      zavg[ichan]=s1/(float) (nblock*nsum);
+      zstd[ichan]=s2/(float) (nblock*nsum)-zavg[ichan]*zavg[ichan];
+      zstd[ichan]=sqrt(zstd[ichan]);
+    }
+  }
+
+  return;
+}
+
+
+__global__ void propogate_channel_statistics(int nchan, int calchan0, int calchan1, float *zavg, float *zstd) {
+  int chanIdx, startIdx;
+
+  __shared__ float zavgRoll;
+  __shared__ float zstdRoll;
+  __shared__ int nchanProc;
+  __shared__ int chans;
+
+  if (threadIdx.x == 0) {
+    zavgRoll = 0.0;
+    zstdRoll = 0.0;
+  } else if (threadIdx.x == 1) {
+    nchanProc = nchan / blockDim.x + 1;
+  } else if (threadIdx.x == 2) {
+      chans = calchan1 - calchan0;
+  }
+
+  for (chanIdx = calchan0 + threadIdx.x; chanIdx < calchan1; chanIdx++) {
+    atomicAdd(&zavgRoll, zavg[chanIdx]);
+    atomicAdd(&zstdRoll, zstd[chanIdx]);
+  }
+
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    zavgRoll /= chans;
+    zstdRoll /= chans;
+    printf("%f, %f\n", zavgRoll, zstdRoll);
+  }
+  startIdx = threadIdx.x * nchanProc;
+  __syncthreads();
+
+  for (chanIdx = startIdx; (chanIdx < startIdx + nchanProc) && (chanIdx < nchan); chanIdx++) {
+    zavg[chanIdx] = zavgRoll;
+    zstd[chanIdx] = zstdRoll;
   }
 
   return;
 }
 
 // Redigitize the filterbank to 8 bits in segments
-__global__ void redigitize(float *z,int nchan,int nblock,int nsum,float *zavg,float *zstd,float zmin,float zmax,unsigned char *cz)
+__global__ void redigitize(float *z,int nchan,int nblock,int nsum,float *zavg,float *zstd,float zmin,float zmax,int calibrate,unsigned char *cz)
 {
   int64_t ichan,iblock,isum,idx1;
   float zoffset,zscale;
@@ -992,13 +1059,18 @@ __global__ void redigitize(float *z,int nchan,int nblock,int nsum,float *zavg,fl
   ichan=blockIdx.x*blockDim.x+threadIdx.x;
   iblock=blockIdx.y*blockDim.y+threadIdx.y;
   if (ichan<nchan && iblock<nblock) {
-    zoffset=zavg[ichan]-zmin*zstd[ichan];
-    zscale=(zmin+zmax)*zstd[ichan];
+    if (calibrate) {
+      zoffset=zavg[ichan]-zmin*zstd[ichan];
+      zscale=(zmin+zmax)*zstd[ichan];
+      //printf("%f, %f\n", zoffset, zscale);
+    }
 
     for (isum=0;isum<nsum;isum++) {
       idx1=ichan+nchan*(isum+iblock*nsum);
-      z[idx1]-=zoffset;
-      z[idx1]*=256.0/zscale;
+      if (calibrate) {
+        z[idx1]-=zoffset;
+        z[idx1]*=256.0/zscale;
+      }
       cz[idx1]=(unsigned char) z[idx1];
       if (z[idx1]<0.0) cz[idx1]=0;
       if (z[idx1]>255.0) cz[idx1]=255;
@@ -1009,7 +1081,7 @@ __global__ void redigitize(float *z,int nchan,int nblock,int nsum,float *zavg,fl
 }
 
 // Decimate and Redigitize the filterbank to 8 bits in segments
-__global__ void decimate_and_redigitize(float *z,int ndec,int nchan,int nblock,int nsum,float *zavg,float *zstd,float zmin,float zmax,unsigned char *cz)
+__global__ void decimate_and_redigitize(float *z,int ndec,int nchan,int nblock,int nsum,float *zavg,float *zstd,float zmin,float zmax,int calibrate,unsigned char *cz)
 {
   int64_t ichan,iblock,isum,idx1,idx2,idec;
   float zoffset,zscale,ztmp;
@@ -1017,8 +1089,10 @@ __global__ void decimate_and_redigitize(float *z,int ndec,int nchan,int nblock,i
   ichan=blockIdx.x*blockDim.x+threadIdx.x;
   iblock=blockIdx.y*blockDim.y+threadIdx.y;
   if (ichan<nchan && iblock<nblock) {
-    zoffset=zavg[ichan]-zmin*zstd[ichan];
-    zscale=(zmin+zmax)*zstd[ichan];
+    if (calibrate) {
+      zoffset=zavg[ichan]-zmin*zstd[ichan];
+      zscale=(zmin+zmax)*zstd[ichan];
+    }
 
     for (isum=0;isum<nsum;isum+=ndec) {
       idx2=ichan+nchan*(isum/ndec+iblock*nsum/ndec);
@@ -1027,8 +1101,10 @@ __global__ void decimate_and_redigitize(float *z,int ndec,int nchan,int nblock,i
   ztmp+=z[idx1];
       }
       ztmp/=(float) ndec;
-      ztmp-=zoffset;
-      ztmp*=256.0/zscale;
+      if (calibrate) {
+        ztmp-=zoffset;
+        ztmp*=256.0/zscale;
+      }
       cz[idx2]=(unsigned char) ztmp;
       if (ztmp<0.0) cz[idx2]=0;
       if (ztmp>255.0) cz[idx2]=255;
