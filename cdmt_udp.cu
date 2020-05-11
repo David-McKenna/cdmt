@@ -72,7 +72,7 @@ int main(int argc,char *argv[])
   dim3 blocksize,gridsize;
   clock_t startclock;
   float *dm,*ddm,dm_start,dm_step;
-  char fname[128],fheader[1024],*udpfname,sphdrfname[1024],obsid[128]="cdmt";
+  char fname[128],fheader[1024],*udpfname,sphdrfname[1024] = "",obsid[128]="cdmt";
   int bytes_read;
   long int ts_read=LONG_MAX,ts_skip=0;
   long int total_ts_read=0,bytes_skip=0;
