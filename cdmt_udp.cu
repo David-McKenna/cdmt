@@ -37,12 +37,13 @@ __global__ void compute_block_sums(float *z,int nchan,int nblock,int nsum,float 
 __global__ void compute_channel_statistics(int nchan,int nblock,int nsum,float *bs1,float *bs2,float *zavg,float *zstd);
 __global__ void redigitize(float *z,int nchan,int nblock,int nsum,float *zavg,float *zstd,float zmin,float zmax,unsigned char *cz);
 __global__ void decimate_and_redigitize(float *z,int ndec,int nchan,int nblock,int nsum,float *zavg,float *zstd,float zmin,float zmax,unsigned char *cz);
+__global__ void decimate(float *z,int ndec,int nchan,int nblock,int nsum,float *cz);
 void write_filterbank_header(struct header h,FILE *file);
 
 // Usage
 void usage()
 {
-  printf("cdmt -d <DM start,step,num> -D <GPU device> -b <ndec> -N <forward FFT size> -n <overlap region> -o <outputname> -s <sigproc header location> <fil prefix>\n\n");
+  printf("cdmt -v -c -d <DM start,step,num> -D <GPU device> -b <ndec> -N <forward FFT size> -n <overlap region> -f <number of FFTs per operation> -o <outputname> -s <sigproc header location> <fil prefix>\n\n");
   printf("Compute coherently dedispersed SIGPROC filterbank files from LOFAR complex voltage data in raw udp format.\n");
   printf("-D <GPU device>  Select GPU device [integer, default: 0]\n");
   printf("-b <ndec>        Number of time samples to average [integer, default: 1]\n");
@@ -50,9 +51,12 @@ void usage()
   printf("-o <outputname>           Output filename [default: cdmt]\n");
   printf("-N <forward FFT size>     Forward FFT size [integer, default: 65536]\n");
   printf("-n <overlap region>       Overlap region [integer, default: 2048]\n");
-  printf("-s <bytes>       Number of bytes to skip in the filterbank before stating processing [integer, default: 0]\n");
-  printf("-r <bytes>       Number of bytes to read in total from the -s offset [integer, default: length of file]\n");
+  printf("-s <bytes>       Number of time samples to skip in the filterbank before stating processing [integer, default: 0]\n");
+  printf("-r <bytes>       Number of time samples to read in total from the -s offset [integer, default: length of file]\n");
   printf("-m <sigproc header location>  Sigproc header to read metadata from [default: fil prefix.sigprochdr]\n");
+  printf("-f <FFTs per op> Number of FFTs to execute per cuFFT call [default: 128]\n");
+  printf("-c               Disable redigitisation; output float32 [default: false]\n");
+  printf("-v               Enable verbose output [default:false]\n");
 
   return;
 }
@@ -60,10 +64,11 @@ void usage()
 int main(int argc,char *argv[])
 {
   int i,nsamp,nfft,mbin,nvalid,nchan=8,nbin=65536,noverlap=2048,nsub=20,ndm,ndec=1;
-  int idm,iblock,nread,mchan,msamp,mblock,msum=1024;
+  int idm,iblock,nread_tmp,nread,mchan,msamp,mblock,msum=1024;
   char *header,*udpbuf[4],*dudpbuf[4];
   FILE *rawfile[4],*file;
   unsigned char *cbuf,*dcbuf;
+  float *cbuff, *dcbuff;
   float *fbuf,*dfbuf;
   float *bs1,*bs2,*zavg,*zstd;
   cufftComplex *cp1,*cp2,*dc,*cp1p,*cp2p;
@@ -76,13 +81,14 @@ int main(int argc,char *argv[])
   int bytes_read;
   long int ts_read=LONG_MAX,ts_skip=0;
   long int total_ts_read=0,bytes_skip=0;
-  int part=0,device=0;
+  int part=0,device=0,verbose=0,nforward=128,redig=1;
   int arg=0;
   FILE **outfile;
+  double timeInSeconds;
 
   // Read options
   if (argc>1) {
-    while ((arg=getopt(argc,argv,"d:D:ho:b:N:n:s:r:m:"))!=-1) {
+    while ((arg=getopt(argc,argv,"vcf:d:D:ho:b:N:n:s:r:m:"))!=-1) {
       switch (arg) {
   
       case 'n':
@@ -120,8 +126,23 @@ int main(int argc,char *argv[])
       case 'r':
   ts_read=atol(optarg);
   break;
+
+      case 'f':
+  nforward=atoi(optarg);
+  break;
+  
+      case 'c':
+  redig=0;
+  break;
+
+      case 'v':
+  verbose=1;
+  break;
+
       case 'h':
   usage();
+  return 0;
+
   return 0;
       }
     }
@@ -138,15 +159,15 @@ int main(int argc,char *argv[])
     fprintf(stderr, "ERROR: nbin must be disible by 8 (currently %d, remainder %d). Exiting.\n", nbin, nbin % 8);
     exit(1);
   }
-  if ( (128 * (nbin-2*noverlap)) % 8 != 0 ) {
+  if ( (nforward * (nbin-2*noverlap)) % 8 != 0 ) {
     fprintf(stderr, "ERROR: Valid data length must be divisible by 8 (currently %d, remainer %d). Exiting.", nbin-2*noverlap, (nbin-2*noverlap) % 8);
     exit(1);
   }
 
-  if ((128 * (nbin-2*noverlap) / 8) % 1024 != 0) {
-    fprintf(stderr, "ERROR: Interal sum cannot proceed; valid samples must be divisible by 1024 (currently %d, remainder %d).\n", (128 * (nbin-2*noverlap) / 8), (128 * (nbin-2*noverlap) / 8) % 1024);
-    fprintf(stderr, "Consider using %d or %d as your forward FFT size next time. Exiting.\n", 64 * ((128 * (nbin-2*noverlap) / 8) - (128 * (nbin-2*noverlap) / 8) % 1024) / 1024 + 2 * noverlap,
-                                                                                   64 * ((128 * (nbin-2*noverlap) / 8) + (1024  - (128 * (nbin-2*noverlap) / 8) % 1024)) / 1024 + 2 * noverlap);
+  if ((nforward * (nbin-2*noverlap) / 8) % 1024 != 0) {
+    fprintf(stderr, "ERROR: Interal sum cannot proceed; valid samples must be divisible by 1024 (currently %d, remainder %d).\n", (nforward * (nbin-2*noverlap) / 8), (nforward * (nbin-2*noverlap) / 8) % 1024);
+    fprintf(stderr, "Consider using %d or %d as your forward FFT size next time. Exiting.\n", 64 * ((nforward * (nbin-2*noverlap) / 8) - (nforward * (nbin-2*noverlap) / 8) % 1024) / 1024 + 2 * noverlap,
+                                                                                   64 * ((nforward * (nbin-2*noverlap) / 8) + (1024  - (nforward * (nbin-2*noverlap) / 8) % 1024)) / 1024 + 2 * noverlap);
     exit(1);
   }
   
@@ -154,26 +175,42 @@ int main(int argc,char *argv[])
   if (strcmp(sphdrfname, "") == 0) {
     sprintf(sphdrfname, "%s.sigprochdr", udpfname);
   }
+
+  if (verbose) {
+    printf("Forward FFT Size:\t%d\n", nbin);
+    printf("Overlap size:\t%d\n", noverlap);
+    printf("Decimation steps:\t%d\n", ndec);
+    printf("Output prefix:\t%s\n", obsid);
+    printf("GPU Device:\t%d\n", device);
+    printf("DM Start, Step, Steps:\t%f, %f, %d\n", dm_start, dm_step, ndm);
+    printf("Sigproc header:\t%s\n", sphdrfname);
+    printf("Skip to timestep:\t%ld\n", ts_skip);
+    printf("Number of timesteps to read:\t%ld\n", ts_read);
+    printf("Number of bins to process per group:\t%d\n", nforward);
+    printf("Redigitize output:\t%d\n", redig);
+  }
   
   // Read sigproc header
   struct header hdr = read_sigproc_header(sphdrfname, udpfname);
 
-  printf("====ORIGINAL HEADER INFORMATION====\n");
-  printf("nsub: %d, nsamp: %d, nbit: %d, nchan %d\n", hdr.nsub, hdr.nsamp, hdr.nbit, hdr.nchan);
-  printf("tstart: %lf\n", hdr.tstart);
-  printf("tsamp: %.08lf\n", hdr.tsamp);
-  printf("fch1: %lf\n", hdr.fch1);
-  printf("foff: %lf\n", hdr.foff);
-  printf("fcen: %lf\n", hdr.fcen);
-  printf("bwchan: %lf\n", hdr.bwchan);
-  printf("src_raj: %lf\n", hdr.src_raj);
-  printf("src_dej: %lf\n", hdr.src_dej);
-  printf("source: %s\n", hdr.source_name);
-  printf("====ORIGINAL HEADER INFORMATION====\n");
+  if (verbose) {
+    printf("====ORIGINAL HEADER INFORMATION====\n");
+    printf("nsub: %d, nsamp: %d, nbit: %d, nchan %d\n", hdr.nsub, hdr.nsamp, hdr.nbit, hdr.nchan);
+    printf("tstart: %lf\n", hdr.tstart);
+    printf("tsamp: %.08lf\n", hdr.tsamp);
+    printf("fch1: %lf\n", hdr.fch1);
+    printf("foff: %lf\n", hdr.foff);
+    printf("fcen: %lf\n", hdr.fcen);
+    printf("bwchan: %lf\n", hdr.bwchan);
+    printf("src_raj: %lf\n", hdr.src_raj);
+    printf("src_dej: %lf\n", hdr.src_dej);
+    printf("source: %s\n", hdr.source_name);
+    printf("====ORIGINAL HEADER INFORMATION====\n");
+  }
 
   // Handle skip flag
   if (ts_skip > 0) {
-    // If it's initialised by default...
+    // If it's not initialised by default...
     if (hdr.nbit == 0)
       hdr.nbit = 8;
     bytes_skip = (long int) (ts_skip * (float) hdr.nsub * (float) hdr.nbit / 8.0);
@@ -183,39 +220,44 @@ int main(int argc,char *argv[])
 
   // Read the number of subbands
   nsub=hdr.nsub;
+  double timeOffset = hdr.tsamp / nsub;
 
   // Adjust header for filterbank format
   hdr.tsamp*=nchan*ndec;
   hdr.nchan=nsub*nchan;
-  hdr.nbit=8;
+  if (redig) hdr.nbit=8;
+  else hdr.nbit=32;
   hdr.fch1=hdr.fcen+0.5*hdr.nsub*hdr.bwchan-0.5*hdr.bwchan/nchan;
   hdr.foff=-fabs(hdr.bwchan/nchan);
 
-
-  printf("====NEW HEADER INFORMATION====\n");
-  printf("nsub: %d, nsamp: %d, nbit: %d, nchan %d\n", hdr.nsub, hdr.nsamp, hdr.nbit, hdr.nchan);
-  printf("tstart: %lf\n", hdr.tstart);
-  printf("tsamp: %.08lf\n", hdr.tsamp);
-  printf("fch1: %lf\n", hdr.fch1);
-  printf("foff: %lf\n", hdr.foff);
-  printf("fcen: %lf\n", hdr.fcen);
-  printf("bwchan: %lf\n", hdr.bwchan);
-  printf("src_raj: %lf\n", hdr.src_raj);
-  printf("src_dej: %lf\n", hdr.src_dej);
-  printf("source: %s\n", hdr.source_name);
-  printf("====NEW HEADER INFORMATION====\n");
+  if (verbose) {
+    printf("====NEW HEADER INFORMATION====\n");
+    printf("nsub: %d, nsamp: %d, nbit: %d, nchan %d\n", hdr.nsub, hdr.nsamp, hdr.nbit, hdr.nchan);
+    printf("tstart: %lf\n", hdr.tstart);
+    printf("tsamp: %.08lf\n", hdr.tsamp);
+    printf("fch1: %lf\n", hdr.fch1);
+    printf("foff: %lf\n", hdr.foff);
+    printf("fcen: %lf\n", hdr.fcen);
+    printf("bwchan: %lf\n", hdr.bwchan);
+    printf("src_raj: %lf\n", hdr.src_raj);
+    printf("src_dej: %lf\n", hdr.src_dej);
+    printf("source: %s\n", hdr.source_name);
+    printf("====NEW HEADER INFORMATION====\n");
+  }
 
   // Data size
   nvalid=nbin-2*noverlap;
-  nsamp=128*nvalid;
+  nsamp=nforward*nvalid;
   nfft=(int) ceil(nsamp/(float) nvalid);
   mbin=nbin/nchan; // nbin must be evenly divisible by 8
   mchan=nsub*nchan;
-  msamp=nsamp/nchan; // 128 * nvalid must be divisble by 8
-  mblock=msamp/msum; // 128 * nvalid / 8 must be disible by 1024
+  msamp=nsamp/nchan; // nforward * nvalid must be divisble by 8
+  mblock=msamp/msum; // nforward * nvalid / 8 must be disible by 1024
 
-  printf("nbin: %d nfft: %d nsub: %d mbin: %d nchan: %d nsamp: %d nvalid: %d\n",nbin,nfft,nsub,mbin,nchan,nsamp,nvalid);
-  printf("msamp: %d mblock: %d mchan: %d\n", msamp, mblock, mchan);
+  if (verbose) {
+    printf("nbin: %d nfft: %d nsub: %d mbin: %d nchan: %d nsamp: %d nvalid: %d\n",nbin,nfft,nsub,mbin,nchan,nsamp,nvalid);
+    printf("msamp: %d mblock: %d mchan: %d\n", msamp, mblock, mchan);
+  }
 
   // Set device
   checkCudaErrors(cudaSetDevice(device));
@@ -241,13 +283,15 @@ int main(int argc,char *argv[])
   // Allocate device memory for chirp
   checkCudaErrors(cudaMalloc((void **) &dc, (size_t) sizeof(cufftComplex)*nbin*nsub*ndm));
 
-  // Allocate device memory for block sums
-  checkCudaErrors(cudaMalloc((void **) &bs1, (size_t) sizeof(float)*mblock*mchan));
-  checkCudaErrors(cudaMalloc((void **) &bs2, (size_t) sizeof(float)*mblock*mchan));
+  if (redig) {
+    // Allocate device memory for block sums
+    checkCudaErrors(cudaMalloc((void **) &bs1, (size_t) sizeof(float)*mblock*mchan));
+    checkCudaErrors(cudaMalloc((void **) &bs2, (size_t) sizeof(float)*mblock*mchan));
 
-  // Allocate device memory for channel averages and standard deviations
-  checkCudaErrors(cudaMalloc((void **) &zavg, (size_t) sizeof(float)*mchan));
-  checkCudaErrors(cudaMalloc((void **) &zstd, (size_t) sizeof(float)*mchan));
+    // Allocate device memory for channel averages and standard deviations
+    checkCudaErrors(cudaMalloc((void **) &zavg, (size_t) sizeof(float)*mchan));
+    checkCudaErrors(cudaMalloc((void **) &zstd, (size_t) sizeof(float)*mchan));
+  }
 
   // Allocate memory for redigitized output and header
   header=(char *) malloc(sizeof(char)*HEADERSIZE);
@@ -259,8 +303,16 @@ int main(int argc,char *argv[])
   // Allocate output buffers
   fbuf=(float *) malloc(sizeof(float)*nsamp*nsub);
   checkCudaErrors(cudaMalloc((void **) &dfbuf, (size_t) sizeof(float)*nsamp*nsub));
-  cbuf=(unsigned char *) malloc(sizeof(unsigned char)*msamp*mchan/ndec);
-  checkCudaErrors(cudaMalloc((void **) &dcbuf, (size_t) sizeof(unsigned char)*msamp*mchan/ndec));
+  
+  if (redig) {
+    cbuf=(unsigned char *) malloc(sizeof(unsigned char)*msamp*mchan/ndec);
+    checkCudaErrors(cudaMalloc((void **) &dcbuf, (size_t) sizeof(unsigned char)*msamp*mchan/ndec));
+  }
+  else {
+    cbuff = (float *) malloc(sizeof(float)*msamp*mchan/ndec);
+    if (ndec > 1) checkCudaErrors(cudaMalloc((void **) &dcbuff, (size_t) sizeof(float)*msamp*mchan/ndec));
+  }
+
 
   // Allocate DMs and copy to device
   dm=(float *) malloc(sizeof(float)*ndm);
@@ -316,21 +368,33 @@ int main(int argc,char *argv[])
     rawfile[i]=fopen(hdr.rawfname[i],"r");
     if (bytes_skip > 0)
       fseek(rawfile[i],bytes_skip,SEEK_SET);
+
+    if (verbose) printf("Skipping to timestep %ld (byte %ld ftell %ld)\n", ts_skip, bytes_skip, ftell(rawfile[i]));
   }
 
   // Loop over input file contents
   for (iblock=0;;iblock++) {
     // Read block
+    nread = INT_MAX;
     startclock=clock();
-    for (i=0;i<4;i++)
-      nread=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub;
+    for (i=0;i<4;i++) {
+      nread_tmp=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub;
+
+      if (nread > nread_tmp) {
+        nread = nread_tmp;
+
+        if (i != 0 && nread != nsamp) printf("File %d returned less data than expected.\n", i);
+      }
+    }
     if (nread==0) {
       printf("No data read from last file; assuming EOF, finishng up.\n");
       break;
     }
 
+    if (nread < nsamp) printf("Warning: ingestested less data than requested. Nearing EOF.\n");
+
     // Count up the total bytes read
-    total_ts_read += nread * nsub;
+    total_ts_read += nread;
 
     printf("Block: %d: Read %ld MB in %.2f s\n",iblock,sizeof(char)*nread*nsub*4/(1<<20),(float) (clock()-startclock)/CLOCKS_PER_SEC);
 
@@ -376,32 +440,47 @@ int main(int argc,char *argv[])
       gridsize.x=mbin/blocksize.x+1; gridsize.y=nchan/blocksize.y+1; gridsize.z=nfft/blocksize.z+1;
       transpose_unpadd_and_detect<<<gridsize,blocksize>>>(cp1,cp2,mbin,nchan,nfft,nsub,noverlap/nchan,nread/nchan,dfbuf);
       
-      // Compute block sums for redigitization
-      blocksize.x=32; blocksize.y=32; blocksize.z=1;
-      gridsize.x=mchan/blocksize.x+1; gridsize.y=mblock/blocksize.y+1; gridsize.z=1;
-      compute_block_sums<<<gridsize,blocksize>>>(dfbuf,mchan,mblock,msum,bs1,bs2);
-      
-      // Compute channel stats
-      blocksize.x=32; blocksize.y=1; blocksize.z=1;
-      gridsize.x=mchan/blocksize.x+1; gridsize.y=1; gridsize.z=1;
-      compute_channel_statistics<<<gridsize,blocksize>>>(mchan,mblock,msum,bs1,bs2,zavg,zstd);
+      if (redig) {
+        // Compute block sums for redigitization
+        blocksize.x=32; blocksize.y=32; blocksize.z=1;
+        gridsize.x=mchan/blocksize.x+1; gridsize.y=mblock/blocksize.y+1; gridsize.z=1;
+        compute_block_sums<<<gridsize,blocksize>>>(dfbuf,mchan,mblock,msum,bs1,bs2);
+        
+        // Compute channel stats
+        blocksize.x=32; blocksize.y=1; blocksize.z=1;
+        gridsize.x=mchan/blocksize.x+1; gridsize.y=1; gridsize.z=1;
+        compute_channel_statistics<<<gridsize,blocksize>>>(mchan,mblock,msum,bs1,bs2,zavg,zstd);
 
-      // Redigitize data to 8bits
-      blocksize.x=32; blocksize.y=32; blocksize.z=1;
-      gridsize.x=mchan/blocksize.x+1; gridsize.y=mblock/blocksize.y+1; gridsize.z=1;
-      if (ndec==1)
-  redigitize<<<gridsize,blocksize>>>(dfbuf,mchan,mblock,msum,zavg,zstd,3.0,5.0,dcbuf);
-      else
-  decimate_and_redigitize<<<gridsize,blocksize>>>(dfbuf,ndec,mchan,mblock,msum,zavg,zstd,3.0,5.0,dcbuf);      
+        // Redigitize data to 8bits
+        blocksize.x=32; blocksize.y=32; blocksize.z=1;
+        gridsize.x=mchan/blocksize.x+1; gridsize.y=mblock/blocksize.y+1; gridsize.z=1;
+        if (ndec==1)
+    redigitize<<<gridsize,blocksize>>>(dfbuf,mchan,mblock,msum,zavg,zstd,3.0,5.0,dcbuf);
+        else
+    decimate_and_redigitize<<<gridsize,blocksize>>>(dfbuf,ndec,mchan,mblock,msum,zavg,zstd,3.0,5.0,dcbuf);      
 
-      // Copy buffer to host
-      checkCudaErrors(cudaMemcpy(cbuf,dcbuf,sizeof(unsigned char)*msamp*mchan/ndec,cudaMemcpyDeviceToHost));
+        // Copy buffer to host
+        checkCudaErrors(cudaMemcpy(cbuf,dcbuf,sizeof(unsigned char)*msamp*mchan/ndec,cudaMemcpyDeviceToHost));
+        // Write buffer
+        fwrite(cbuf,sizeof(char),nread*nsub/ndec,outfile[idm]);
+
+      } else {
+        if (ndec==1) checkCudaErrors(cudaMemcpy(cbuff, dfbuf,sizeof(float)*msamp*mchan,cudaMemcpyDeviceToHost));
+        else {
+          blocksize.x=32; blocksize.y=32; blocksize.z=1;
+          gridsize.x=mchan/blocksize.x+1; gridsize.y=mblock/blocksize.y+1; gridsize.z=1;
+          decimate<<<gridsize,blocksize>>>(dfbuf,ndec,mchan,mblock,msum,dcbuff);
+          checkCudaErrors(cudaMemcpy(cbuff,dcbuff,sizeof(float)*msamp*mchan/ndec,cudaMemcpyDeviceToHost));
+        }
+
+        fwrite(cbuff,sizeof(float),nread*nsub/ndec, outfile[idm]);
+      }
 
       // Write buffer
-      fwrite(cbuf,sizeof(char),nread*nsub/ndec,outfile[idm]);
     }
     printf("Processed %d DMs in %.2f s\n",ndm,(float) (clock()-startclock)/CLOCKS_PER_SEC);
-
+    timeInSeconds = (double) ftell(rawfile[0]) * timeOffset;
+    printf("Current file position: %02ld:%02ld:%05.2lf (%1.2lfs)\n\n", (long int) (timeInSeconds / 3600.0), (long int) ((fmod(timeInSeconds, 3600.0)) / 60.0), fmod(timeInSeconds, 60.0), timeInSeconds);
     // Exit when we pass the read length limit
     if (total_ts_read > ts_read)
       break;
@@ -424,20 +503,25 @@ int main(int argc,char *argv[])
   }
   free(fbuf);
   free(dm);
-  free(cbuf);
   free(outfile);
 
+  if (redig) {
+    free(cbuf);
+    cudaFree(bs1);
+    cudaFree(bs2);
+    cudaFree(zavg);
+    cudaFree(zstd);
+    cudaFree(dcbuf);
+  } else {
+    free(cbuff);
+    if (ndec > 1) cudaFree(dcbuff);
+  }
   cudaFree(dfbuf);
-  cudaFree(dcbuf);
   cudaFree(cp1);
   cudaFree(cp2);
   cudaFree(cp1p);
   cudaFree(cp2p);
   cudaFree(dc);
-  cudaFree(bs1);
-  cudaFree(bs2);
-  cudaFree(zavg);
-  cudaFree(zstd);
   cudaFree(ddm);
 
   // Free plan
@@ -465,11 +549,11 @@ void get_string(FILE *inputfile, int *nbytes, char string[])
 {
   int nchar;
   strcpy(string,"ERROR");
-  fread(&nchar, sizeof(int), 1, inputfile);
+  if (! fread(&nchar, sizeof(int), 1, inputfile)) fprintf(stderr, "Failed to get int at %d\n", *nbytes);
   *nbytes=sizeof(int);
   if (feof(inputfile)) exit(0);
   if (nchar>80 || nchar<1) return;
-  fread(string, nchar, 1, inputfile);
+  if (! fread(string, nchar, 1, inputfile)) fprintf(stderr, "Failed to get stirng at %d\n", *nbytes);
   string[nchar]='\0';
   *nbytes+=nchar;
 }
@@ -479,7 +563,7 @@ struct header read_header(FILE *inputfile) /* includefile */
 {
   char string[80], message[80];
   int nbytes,totalbytes,expecting_rawdatafile=0,expecting_source_name=0; 
-  int isign=0;
+  int isign=0, dummyread=0;
   struct header hdr;
 
 
@@ -515,32 +599,32 @@ struct header read_header(FILE *inputfile) /* includefile */
       fseek(inputfile, sizeof(double), SEEK_CUR);
       totalbytes+=sizeof(double);
     } else if (strings_equal(string, (char *) "src_raj")) {
-      fread(&(hdr.src_raj),sizeof(hdr.src_raj),1,inputfile);
+      dummyread = fread(&(hdr.src_raj),sizeof(hdr.src_raj),1,inputfile);
       totalbytes+=sizeof(hdr.src_raj);
     } else if (strings_equal(string, (char *) "src_dej")) {
-      fread(&(hdr.src_dej),sizeof(hdr.src_dej),1,inputfile);
+      dummyread = fread(&(hdr.src_dej),sizeof(hdr.src_dej),1,inputfile);
       totalbytes+=sizeof(hdr.src_dej);
     } else if (strings_equal(string, (char *) "tstart")) {
-      fread(&(hdr.tstart),sizeof(hdr.tstart),1,inputfile);
+      dummyread = fread(&(hdr.tstart),sizeof(hdr.tstart),1,inputfile);
       totalbytes+=sizeof(hdr.tstart);
     } else if (strings_equal(string, (char *) "tsamp")) {
-      fread(&(hdr.tsamp),sizeof(hdr.tsamp),1,inputfile);
+      dummyread = fread(&(hdr.tsamp),sizeof(hdr.tsamp),1,inputfile);
       totalbytes+=sizeof(hdr.tsamp);
     } else if (strings_equal(string, (char *) "period")) {
       fseek(inputfile, sizeof(double), SEEK_CUR);
       totalbytes+=sizeof(double);
     } else if (strings_equal(string, (char *) "fch1")) {
-      fread(&(hdr.fch1),sizeof(hdr.fch1),1,inputfile);
+      dummyread = fread(&(hdr.fch1),sizeof(hdr.fch1),1,inputfile);
       totalbytes+=sizeof(hdr.fch1);
     } else if (strings_equal(string, (char *) "fchannel")) {
       fseek(inputfile, sizeof(double), SEEK_CUR);
       totalbytes+=sizeof(double);
     } else if (strings_equal(string, (char *) "foff")) {
-      fread(&(hdr.foff),sizeof(hdr.foff),1,inputfile);
+      dummyread = fread(&(hdr.foff),sizeof(hdr.foff),1,inputfile);
       totalbytes+=sizeof(hdr.foff);
     } else if (strings_equal(string, (char *) "nchans")) {
       // nsub seems to be nchans in the sigproc hdr
-      fread(&(hdr.nsub),sizeof(hdr.nsub),1,inputfile);
+      dummyread = fread(&(hdr.nsub),sizeof(hdr.nsub),1,inputfile);
       totalbytes+=sizeof(hdr.nsub);
     } else if (strings_equal(string, (char *) "telescope_id")) {
       fseek(inputfile, sizeof(int), SEEK_CUR);
@@ -558,7 +642,7 @@ struct header read_header(FILE *inputfile) /* includefile */
       fseek(inputfile, sizeof(int), SEEK_CUR);
       totalbytes+=sizeof(int);
     } else if (strings_equal(string, (char *) "nbits")) {
-      fread(&(hdr.nbit),sizeof(hdr.nbit),1,inputfile);
+      dummyread = fread(&(hdr.nbit),sizeof(hdr.nbit),1,inputfile);
       totalbytes+=sizeof(hdr.nbit);
     } else if (strings_equal(string, (char *) "barycentric")) {
       fseek(inputfile, sizeof(int), SEEK_CUR);
@@ -582,7 +666,7 @@ struct header read_header(FILE *inputfile) /* includefile */
       fseek(inputfile, sizeof(double), SEEK_CUR);
       totalbytes+=sizeof(double);
     } else if (strings_equal(string, (char *) "signed")) {
-      fread(&isign,sizeof(isign),1,inputfile);
+      dummyread = fread(&isign,sizeof(isign),1,inputfile);
       totalbytes+=sizeof(isign);
     } else if (expecting_rawdatafile) {
       //strcpy(hdr.rawfname,string);
@@ -767,10 +851,8 @@ __global__ void unpack_and_padd(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,
   if (ibin<nbin && ifft<nfft && isub<nsub) {
     idx1=ibin+nbin*isub+nsub*nbin*ifft;
     isamp=ibin+(nbin-2*noverlap)*ifft-noverlap;
-    idx2=isub+nsub*isamp;
-    if (isamp<0) {
-      idx2 *= -1;
-    } else if (isamp>=nsamp) {
+    idx2=isub+nsub*abs(isamp);
+    if (isamp>=nsamp) {
       idx2 -= 2 * (isamp - nsamp + 1) * nsub;
     } 
 
@@ -1031,6 +1113,30 @@ __global__ void decimate_and_redigitize(float *z,int ndec,int nchan,int nblock,i
       cz[idx2]=(unsigned char) ztmp;
       if (ztmp<0.0) cz[idx2]=0;
       if (ztmp>255.0) cz[idx2]=255;
+    }
+  }
+
+  return;
+}
+
+
+// Decimate the filterbank without redigitisation
+__global__ void decimate(float *z,int ndec,int nchan,int nblock,int nsum,float *cz)
+{
+  int64_t ichan,iblock,isum,idx1,idx2,idec;
+  float ztmp;
+
+  ichan=blockIdx.x*blockDim.x+threadIdx.x;
+  iblock=blockIdx.y*blockDim.y+threadIdx.y;
+  if (ichan<nchan && iblock<nblock) {
+    for (isum=0;isum<nsum;isum+=ndec) {
+      idx2=ichan+nchan*(isum/ndec+iblock*nsum/ndec);
+      for (idec=0,ztmp=0.0;idec<ndec;idec++) {
+  idx1=ichan+nchan*(isum+idec+iblock*nsum);
+  ztmp+=z[idx1];
+      }
+      ztmp/=(float) ndec;
+      cz[idx2]=(float) ztmp;
     }
   }
 
