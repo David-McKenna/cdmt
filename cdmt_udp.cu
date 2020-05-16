@@ -26,7 +26,7 @@ struct header {
   char *rawfname[4];
 };
 
-struct header read_sigproc_header(char *fname, char *dataname, int rawudp);
+struct header read_sigproc_header(char *fname, char *dataname, int rawudp, int ports);
 void get_channel_chirp(double fcen,double bw,float dm,int nchan,int nbin,int nsub,cufftComplex *c);
 __global__ void transpose_unpadd_and_detect(cufftComplex *cp1,cufftComplex *cp2,int nbin,int nchan,int nfft,int nsub,int noverlap,int nsamp,float *fbuf);
 static __device__ __host__ inline cufftComplex ComplexScale(cufftComplex a,float s);
@@ -41,12 +41,12 @@ __global__ void redigitize(float *z,int nchan,int nblock,int nsum,float *zavg,fl
 __global__ void decimate_and_redigitize(float *z,int ndec,int nchan,int nblock,int nsum,float *zavg,float *zstd,float zmin,float zmax,unsigned char *cz);
 __global__ void decimate(float *z,int ndec,int nchan,int nblock,int nsum,float *cz);
 void write_filterbank_header(struct header h,FILE *file);
-int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, char* udpRawInput, char** udpbuf);
+int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, char* udpRawInput, char** udpbuf);
 
 // Usage
 void usage()
 {
-  printf("cdmt -v -c -d <DM start,step,num> -D <GPU device> -b <ndec> -N <forward FFT size> -n <overlap region> -f <number of FFTs per operation> -o <outputname> -s <sigproc header location> <fil prefix>\n\n");
+  printf("cdmt -v -c -d <DM start,step,num> -D <GPU device> -b <ndec> -N <forward FFT size> -n <overlap region> -f <number of FFTs per operation> -o <outputname> -s <sigproc header location> -p <port nums> <fil prefix>\n\n");
   printf("Compute coherently dedispersed SIGPROC filterbank files from LOFAR complex voltage data in raw udp format.\n");
   printf("-D <GPU device>  Select GPU device [integer, default: 0]\n");
   printf("-b <ndec>        Number of time samples to average [integer, default: 1]\n");
@@ -85,14 +85,14 @@ int main(int argc,char *argv[])
   int bytes_read;
   long int ts_read=LONG_MAX,ts_skip=0;
   long int total_ts_read=0,bytes_skip=0;
-  int part=0,device=0,verbose=0,nforward=128,redig=1,rawudp=0;
+  int part=0,device=0,verbose=0,nforward=128,redig=1,rawudp=0,ports=4;
   int arg=0;
   FILE **outfile;
   double timeInSeconds;
 
   // Read options
   if (argc>1) {
-    while ((arg=getopt(argc,argv,"vcuf:d:D:ho:b:N:n:s:r:m:"))!=-1) {
+    while ((arg=getopt(argc,argv,"vcup:f:d:D:ho:b:N:n:s:r:m:"))!=-1) {
       switch (arg) {
   
       case 'n':
@@ -147,6 +147,9 @@ int main(int argc,char *argv[])
   rawudp=1;
   break;
 
+      case 'p':
+  ports=atoi(optarg);
+
       case 'h':
   usage();
   return 0;
@@ -161,6 +164,10 @@ int main(int argc,char *argv[])
   }
   udpfname=argv[optind];
 
+  if (ports !=4 && !rawudp) {
+    fprintf(stderr, "WARNING: the '-p' flag is only meant for use in conjunction wuth the '-u' flag, resetting ports to 4.\n");
+    ports = 4;
+  }
 
   // Sanity checks to avoid voids in output filterbank
   if (nbin % 8 != 0) {
@@ -199,7 +206,7 @@ int main(int argc,char *argv[])
   }
   
   // Read sigproc header
-  struct header hdr = read_sigproc_header(sphdrfname, udpfname, rawudp);
+  struct header hdr = read_sigproc_header(sphdrfname, udpfname, rawudp, ports);
 
   if (verbose) {
     printf("====ORIGINAL HEADER INFORMATION====\n");
@@ -389,7 +396,7 @@ int main(int argc,char *argv[])
   }
 
   // Read files
-  for (i=0;i<4;i++) {
+  for (i=0;i<ports;i++) {
     rawfile[i]=fopen(hdr.rawfname[i],"r");
     if (bytes_skip > 0)
       fseek(rawfile[i],bytes_skip,SEEK_SET);
@@ -402,10 +409,10 @@ int main(int argc,char *argv[])
     // Read block
     nread = INT_MAX;
     startclock=clock();
-    for (i=0;i<4;i++) {
+    for (i=0;i<ports;i++) {
 
       if (rawudp) {
-        nread_tmp = reshapeRawUdp(rawfile[i], packetGulp, i, udpRawInput, udpbuf);
+        nread_tmp = reshapeRawUdp(rawfile[i], packetGulp, i, ports, udpRawInput, udpbuf);
       } else nread_tmp=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub;
 
       if (nread > nread_tmp) {
@@ -734,7 +741,7 @@ struct header read_header(FILE *inputfile) /* includefile */
 
 
 
-struct header read_sigproc_header(char *fname, char *dataname, int rawudp)
+struct header read_sigproc_header(char *fname, char *dataname, int rawudp, int ports)
 {
 
   char ftest[2048];
@@ -751,7 +758,7 @@ struct header read_sigproc_header(char *fname, char *dataname, int rawudp)
 
 
   // Check files
-  for (i=0;i<4;i++) {
+  for (i=0;i<ports;i++) {
     // Format file name
     if (rawudp) {
       sprintf(ftest,"%s_S%d",dataname,i);
@@ -1183,12 +1190,12 @@ __global__ void decimate(float *z,int ndec,int nchan,int nblock,int nsum,float *
 }
 
 
-int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, char* udpRawInput, char** udpbuf) {
+int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, char* udpRawInput, char** udpbuf) {
 
   int udpPacketLength = UDPPACKETLENGTH;
   int udpHeaderLength = UDPHDRLEN;
   int rawBeamletCount = 122;
-  int beamletCount = rawBeamletCount * 4;
+  int beamletCount = rawBeamletCount * ports;
   int scans = 16;
 
   // nread_tmp=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub
