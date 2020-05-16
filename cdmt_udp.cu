@@ -15,6 +15,8 @@
 #define HEADERSIZE 4096
 #define DMCONSTANT 2.41e-10
 
+#define UDPPACKETLENGTH 7824
+#define UDPHDRLEN 16 
 // Struct for header information
 struct header {
   int nchan,nsamp,nbit=0,nsub;
@@ -24,7 +26,7 @@ struct header {
   char *rawfname[4];
 };
 
-struct header read_sigproc_header(char *fname, char *dataname);
+struct header read_sigproc_header(char *fname, char *dataname, int rawudp);
 void get_channel_chirp(double fcen,double bw,float dm,int nchan,int nbin,int nsub,cufftComplex *c);
 __global__ void transpose_unpadd_and_detect(cufftComplex *cp1,cufftComplex *cp2,int nbin,int nchan,int nfft,int nsub,int noverlap,int nsamp,float *fbuf);
 static __device__ __host__ inline cufftComplex ComplexScale(cufftComplex a,float s);
@@ -39,6 +41,7 @@ __global__ void redigitize(float *z,int nchan,int nblock,int nsum,float *zavg,fl
 __global__ void decimate_and_redigitize(float *z,int ndec,int nchan,int nblock,int nsum,float *zavg,float *zstd,float zmin,float zmax,unsigned char *cz);
 __global__ void decimate(float *z,int ndec,int nchan,int nblock,int nsum,float *cz);
 void write_filterbank_header(struct header h,FILE *file);
+int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, char* udpRawInput, char** udpbuf);
 
 // Usage
 void usage()
@@ -56,6 +59,7 @@ void usage()
   printf("-m <sigproc header location>  Sigproc header to read metadata from [default: fil prefix.sigprochdr]\n");
   printf("-f <FFTs per op> Number of FFTs to execute per cuFFT call [default: 128]\n");
   printf("-c               Disable redigitisation; output float32 [default: false]\n");
+  printf("-u               Take in raw udp dumps from Olaf Wulknitz's VLBI recorder [default: false]\n");
   printf("-v               Enable verbose output [default:false]\n");
 
   return;
@@ -81,14 +85,14 @@ int main(int argc,char *argv[])
   int bytes_read;
   long int ts_read=LONG_MAX,ts_skip=0;
   long int total_ts_read=0,bytes_skip=0;
-  int part=0,device=0,verbose=0,nforward=128,redig=1;
+  int part=0,device=0,verbose=0,nforward=128,redig=1,rawudp=0;
   int arg=0;
   FILE **outfile;
   double timeInSeconds;
 
   // Read options
   if (argc>1) {
-    while ((arg=getopt(argc,argv,"vcf:d:D:ho:b:N:n:s:r:m:"))!=-1) {
+    while ((arg=getopt(argc,argv,"vcuf:d:D:ho:b:N:n:s:r:m:"))!=-1) {
       switch (arg) {
   
       case 'n':
@@ -137,6 +141,10 @@ int main(int argc,char *argv[])
 
       case 'v':
   verbose=1;
+  break;
+
+      case 'u':
+  rawudp=1;
   break;
 
       case 'h':
@@ -191,7 +199,7 @@ int main(int argc,char *argv[])
   }
   
   // Read sigproc header
-  struct header hdr = read_sigproc_header(sphdrfname, udpfname);
+  struct header hdr = read_sigproc_header(sphdrfname, udpfname, rawudp);
 
   if (verbose) {
     printf("====ORIGINAL HEADER INFORMATION====\n");
@@ -213,7 +221,18 @@ int main(int argc,char *argv[])
     // If it's not initialised by default...
     if (hdr.nbit == 0)
       hdr.nbit = 8;
-    bytes_skip = (long int) (ts_skip * (float) hdr.nsub * (float) hdr.nbit / 8.0);
+
+    if (rawudp) {
+      if (ts_skip % 16) {
+        printf("Rounding ts_skip down to a the nearest multiple of 16, ");
+        ts_skip -= ts_skip % 16;
+        printf("%ld, to align with udp packet lengths.\n", ts_skip);
+      }
+   
+      bytes_skip = (long int) (ts_skip / 16) * UDPPACKETLENGTH;
+
+    } else bytes_skip = (long int) (ts_skip * (float) hdr.nsub * (float) hdr.nbit / 8.0);
+
     // Account for the difference in time in the new header if we skip bytes    // tstart = MJD, tsamp = seconds, 1 byte = 8 bits = 1 sample per file by default
     hdr.tstart += (double) ts_skip * hdr.tsamp / 86400.0;
   }
@@ -257,6 +276,12 @@ int main(int argc,char *argv[])
   if (verbose) {
     printf("nbin: %d nfft: %d nsub: %d mbin: %d nchan: %d nsamp: %d nvalid: %d\n",nbin,nfft,nsub,mbin,nchan,nsamp,nvalid);
     printf("msamp: %d mblock: %d mchan: %d\n", msamp, mblock, mchan);
+  }
+
+  char *udpRawInput;
+  int packetGulp = nsamp / 16;
+  if (rawudp) {
+    udpRawInput = (char *) malloc(sizeof(char) * packetGulp * UDPPACKETLENGTH);
   }
 
   // Set device
@@ -378,7 +403,10 @@ int main(int argc,char *argv[])
     nread = INT_MAX;
     startclock=clock();
     for (i=0;i<4;i++) {
-      nread_tmp=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub;
+
+      if (rawudp) {
+        nread_tmp = reshapeRawUdp(rawfile[i], packetGulp, i, udpRawInput, udpbuf);
+      } else nread_tmp=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub;
 
       if (nread > nread_tmp) {
         nread = nread_tmp;
@@ -706,7 +734,7 @@ struct header read_header(FILE *inputfile) /* includefile */
 
 
 
-struct header read_sigproc_header(char *fname, char *dataname)
+struct header read_sigproc_header(char *fname, char *dataname, int rawudp)
 {
 
   char ftest[2048];
@@ -725,7 +753,11 @@ struct header read_sigproc_header(char *fname, char *dataname)
   // Check files
   for (i=0;i<4;i++) {
     // Format file name
-    sprintf(ftest,"%s_S%d.rawfil",dataname,i);
+    if (rawudp) {
+      sprintf(ftest,"%s_S%d",dataname,i);
+    } else {
+      sprintf(ftest,"%s_S%d.rawfil",dataname,i);
+    }
     // Try to open
     if ((tmpf=fopen(ftest,"r"))!=NULL) {
       fclose(tmpf);
@@ -733,7 +765,10 @@ struct header read_sigproc_header(char *fname, char *dataname)
       fprintf(stderr,"Raw file %s not found\n",ftest);
       exit (-1);
     }
-    hdr.rawfname[i]=(char *) malloc(sizeof(char) * strlen(dataname) + sizeof(char)*(9));
+
+    if (rawudp) hdr.rawfname[i]=(char *) malloc(sizeof(char) * strlen(dataname) + sizeof(char)*(3));
+    else hdr.rawfname[i]=(char *) malloc(sizeof(char) * strlen(dataname) + sizeof(char)*(9));
+
     strcpy(hdr.rawfname[i],ftest);
   }
 
@@ -747,7 +782,11 @@ struct header read_sigproc_header(char *fname, char *dataname)
   hdr.fcen = hdr.fch1 + (hdr.foff * hdr.nsub * 0.5);
   hdr.bwchan = fabs(hdr.foff);
 
-  hdr.nsamp = (int) (charSize / hdr.nsub / ((float) (hdr.nbit) / (float) 8));
+  if (rawudp) {
+    hdr.nsamp = (int) (charSize / UDPPACKETLENGTH);
+  } else {
+    hdr.nsamp = (int) (charSize / hdr.nsub / ((float) (hdr.nbit) / (float) 8));
+  }
 
   return hdr;
 }
@@ -1141,4 +1180,41 @@ __global__ void decimate(float *z,int ndec,int nchan,int nblock,int nsum,float *
   }
 
   return;
+}
+
+
+int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, char* udpRawInput, char** udpbuf) {
+
+  int udpPacketLength = UDPPACKETLENGTH;
+  int udpHeaderLength = UDPHDRLEN;
+  int rawBeamletCount = 122;
+  int beamletCount = rawBeamletCount * 4;
+  int scans = 16;
+
+  // nread_tmp=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub
+  int nread = fread(udpRawInput, sizeof(char), packetGulp * udpPacketLength, rawfile);
+  
+  int baseOffset, beamletBase, beamletIdx, timeOffset, timeIdx;
+  for (int i = 0; i < packetGulp; i++) {
+    baseOffset = udpPacketLength * i + udpHeaderLength;
+    beamletBase = rawBeamletCount * port;
+
+    for (int j = 0; j < rawBeamletCount; j++) {
+      beamletIdx = baseOffset + j * scans * 4;
+
+      for (int k = 0; k < scans; k++) {
+        timeOffset = k * 4;
+        timeIdx = (i * scans + k) * beamletCount;
+
+        udpbuf[0][timeIdx + beamletBase + j] = udpRawInput[beamletIdx + timeOffset];
+        udpbuf[1][timeIdx + beamletBase + j] = udpRawInput[beamletIdx + timeOffset + 1];
+        udpbuf[2][timeIdx + beamletBase + j] = udpRawInput[beamletIdx + timeOffset + 2];
+        udpbuf[3][timeIdx + beamletBase + j] = udpRawInput[beamletIdx + timeOffset + 3];
+      }
+    }
+  }
+
+  nread /= udpPacketLength;
+  nread *= 16;
+  return nread;
 }
