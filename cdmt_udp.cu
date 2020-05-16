@@ -41,7 +41,7 @@ __global__ void redigitize(float *z,int nchan,int nblock,int nsum,float *zavg,fl
 __global__ void decimate_and_redigitize(float *z,int ndec,int nchan,int nblock,int nsum,float *zavg,float *zstd,float zmin,float zmax,unsigned char *cz);
 __global__ void decimate(float *z,int ndec,int nchan,int nblock,int nsum,float *cz);
 void write_filterbank_header(struct header h,FILE *file);
-int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, char* udpRawInput, char** udpbuf);
+int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul, char* udpRawInput, char** udpbuf);
 
 // Usage
 void usage()
@@ -85,7 +85,7 @@ int main(int argc,char *argv[])
   int bytes_read;
   long int ts_read=LONG_MAX,ts_skip=0;
   long int total_ts_read=0,bytes_skip=0;
-  int part=0,device=0,verbose=0,nforward=128,redig=1,rawudp=0,ports=4;
+  int part=0,device=0,verbose=0,nforward=128,redig=1,rawudp=0,ports=4,bitmul=1;
   int arg=0;
   FILE **outfile;
   double timeInSeconds;
@@ -238,7 +238,7 @@ int main(int argc,char *argv[])
    
       bytes_skip = (long int) (ts_skip / 16) * UDPPACKETLENGTH;
 
-    } else bytes_skip = (long int) (ts_skip * (float) hdr.nsub * (float) hdr.nbit / 8.0);
+    } else bytes_skip = (long int) (ts_skip * (float) hdr.nsub);
 
     // Account for the difference in time in the new header if we skip bytes    // tstart = MJD, tsamp = seconds, 1 byte = 8 bits = 1 sample per file by default
     hdr.tstart += (double) ts_skip * hdr.tsamp / 86400.0;
@@ -247,6 +247,7 @@ int main(int argc,char *argv[])
   // Read the number of subbands
   nsub=hdr.nsub;
   double timeOffset = hdr.tsamp / nsub;
+  bitmul = (int) 8 / hdr.nbit;
 
   // Adjust header for filterbank format
   hdr.tsamp*=nchan*ndec;
@@ -412,7 +413,7 @@ int main(int argc,char *argv[])
     for (i=0;i<ports;i++) {
 
       if (rawudp) {
-        nread_tmp = reshapeRawUdp(rawfile[i], packetGulp, i, ports, udpRawInput, udpbuf);
+        nread_tmp = reshapeRawUdp(rawfile[i], packetGulp, i, ports, bitmul, udpRawInput, udpbuf);
       } else nread_tmp=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub;
 
       if (nread > nread_tmp) {
@@ -1190,16 +1191,30 @@ __global__ void decimate(float *z,int ndec,int nchan,int nblock,int nsum,float *
 }
 
 
-int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, char* udpRawInput, char** udpbuf) {
+int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul, char* udpRawInput, char** udpbuf) {
 
-  int udpPacketLength = UDPPACKETLENGTH;
-  int udpHeaderLength = UDPHDRLEN;
-  int rawBeamletCount = 122;
-  int beamletCount = rawBeamletCount * ports;
+  int udpPacketLength = UDPPACKETLENGTH * bitmul;
+  int udpHeaderLength = UDPHDRLEN * bitmul;
+  int rawBeamletCount = 122 * bitmul;
+  int beamletCount = rawBeamletCount * ports * bitmul;
   int scans = 16;
 
   // nread_tmp=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub
-  int nread = fread(udpRawInput, sizeof(char), packetGulp * udpPacketLength, rawfile);
+  int nread = fread(udpRawInput, sizeof(char), packetGulp * UDPPACKETLENGTH, rawfile);
+
+  char *bitwork;
+  char *workingInput = udpRawInput;
+  char workingChar;
+  if (bitmul == 2) {
+    bitwork = (char *) malloc(sizeof(char) * packetGulp * udpPacketLength);
+    for (int i = 0; i < (int) sizeof(char) * packetGulp * UDPPACKETLENGTH; i++) {
+        workingChar = udpRawInput[i];
+        bitwork[2 * i]     = (workingChar & 240) >> 4;
+        bitwork[2 * i + 1] = (workingChar & 15);
+    }
+
+    workingInput = bitwork;
+  }
   
   int baseOffset, beamletBase, beamletIdx, timeOffset, timeIdx;
   for (int i = 0; i < packetGulp; i++) {
@@ -1213,10 +1228,10 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, char* udpR
         timeOffset = k * 4;
         timeIdx = (i * scans + k) * beamletCount;
 
-        udpbuf[0][timeIdx + beamletBase + j] = udpRawInput[beamletIdx + timeOffset];
-        udpbuf[1][timeIdx + beamletBase + j] = udpRawInput[beamletIdx + timeOffset + 1];
-        udpbuf[2][timeIdx + beamletBase + j] = udpRawInput[beamletIdx + timeOffset + 2];
-        udpbuf[3][timeIdx + beamletBase + j] = udpRawInput[beamletIdx + timeOffset + 3];
+        udpbuf[0][timeIdx + beamletBase + j] = workingInput[beamletIdx + timeOffset];
+        udpbuf[1][timeIdx + beamletBase + j] = workingInput[beamletIdx + timeOffset + 1];
+        udpbuf[2][timeIdx + beamletBase + j] = workingInput[beamletIdx + timeOffset + 2];
+        udpbuf[3][timeIdx + beamletBase + j] = workingInput[beamletIdx + timeOffset + 3];
       }
     }
   }
