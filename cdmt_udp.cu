@@ -42,6 +42,7 @@ __global__ void decimate_and_redigitize(float *z,int ndec,int nchan,int nblock,i
 __global__ void decimate(float *z,int ndec,int nchan,int nblock,int nsum,float *cz);
 void write_filterbank_header(struct header h,FILE *file);
 int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul, char* udpRawInput, char** udpbuf);
+long  __inline__ beamformed_packno(unsigned int timestamp, unsigned int sequence);
 
 // Usage
 void usage()
@@ -165,7 +166,7 @@ int main(int argc,char *argv[])
   udpfname=argv[optind];
 
   if (ports !=4 && !rawudp) {
-    fprintf(stderr, "WARNING: the '-p' flag is only meant for use in conjunction wuth the '-u' flag, resetting ports to 4.\n");
+    fprintf(stderr, "WARNING: the '-p' flag is only meant for use in conjunction with the '-u' flag, resetting ports to 4.\n");
     ports = 4;
   }
 
@@ -1202,9 +1203,44 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
   // nread_tmp=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub
   int nread = fread(udpRawInput, sizeof(char), packetGulp * UDPPACKETLENGTH, rawfile);
 
+  int *droppedPacketsIdx = (int *) calloc(packetGulp, sizeof(int));
+  int droppedPackets = 0, currDroppedPacketIdx = 0, currDroppedPacket, i = 0;
+  long currPackNo, lastPackNo;
+  //unsgined int timestamp, sequence;
+
   char *bitwork;
   char *workingInput = udpRawInput;
   char workingChar;
+
+  for (int i = 1; i < packetGulp; i++) {
+    //timestamp = (unsigned int) ((unsigned int ) <<16 | (unsigned int) );
+    //sequence = (unsigned int) ((unsigned int ) <<16 | (unsigned int) );
+
+    currPackNo = beamformed_packno(
+                      (unsigned int) ((unsigned int) udpRawInput[i * UDPPACKETLENGTH + 8] 
+                                    | (unsigned int) udpRawInput[i * UDPPACKETLENGTH + 9] <<8
+                                    | (unsigned int) udpRawInput[i * UDPPACKETLENGTH + 10] << 16
+                                    | (unsigned int) udpRawInput[i * UDPPACKETLENGTH + 11] << 24),
+
+                      (unsigned int) ((unsigned int) udpRawInput[i * UDPPACKETLENGTH + 12]
+                                    | (unsigned int) udpRawInput[i * UDPPACKETLENGTH + 13] << 8
+                                    | (unsigned int) udpRawInput[i * UDPPACKETLENGTH + 14] << 16
+                                    | (unsigned int) udpRawInput[i * UDPPACKETLENGTH + 15] << 24));
+
+    
+    // Not going to handle the can of worms of out of sequence data...
+    // Tested 300 seconds of packets and they were all in order; hopefully this holds true.
+    if ((currPackNo != (lastPackNo + 1l)) && (currPackNo > lastPackNo)) {
+      printf("Possible dropped packet: %ld, %ld\n", currPackNo, lastPackNo);
+      droppedPacketsIdx[droppedPackets] = i;
+      droppedPackets++;
+    }
+
+    lastPackNo = currPackNo;
+  }
+
+  if (droppedPackets > 0) fseek(rawfile, -1 * UDPPACKETLENGTH * droppedPackets, SEEK_CUR);
+
   if (bitmul == 2) {
     bitwork = (char *) malloc(sizeof(char) * packetGulp * udpPacketLength);
     for (int i = 0; i < (int) sizeof(char) * packetGulp * UDPPACKETLENGTH; i++) {
@@ -1217,7 +1253,14 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
   }
   
   int baseOffset, beamletBase, beamletIdx, timeOffset, timeIdx;
-  for (int i = 0; i < packetGulp; i++) {
+  currDroppedPacket = droppedPacketsIdx[0];
+  for (int iLoop = 0; iLoop < packetGulp; iLoop++) {
+    // If we dropped a packet here, pad with the previous packet
+    if (i == currDroppedPacket && i != 0) {
+      i--;
+      currDroppedPacket = droppedPacketsIdx[++currDroppedPacketIdx];
+    }
+
     baseOffset = udpPacketLength * i + udpHeaderLength;
     beamletBase = rawBeamletCount * port;
 
@@ -1234,9 +1277,30 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
         udpbuf[3][timeIdx + beamletBase + j] = workingInput[beamletIdx + timeOffset + 3];
       }
     }
+
+    i++;
   }
 
   nread /= udpPacketLength;
   nread *= 16;
+
+  free(droppedPacketsIdx);
   return nread;
+}
+
+/*
+
+
+  uint8_t   config;
+  uint16_t  station;
+  uint8_t   num_beamlets, num_slices;
+  int32_t  timestamp, sequence;
+
+};
+*/
+
+// Taken from Olaf Wulknitz's VLBI recorder
+long  __inline__ beamformed_packno(unsigned int timestamp, unsigned int sequence)
+{
+  return ((timestamp*1000000l*200+512)/1024+sequence)/16;
 }
