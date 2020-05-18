@@ -17,6 +17,8 @@
 
 #define UDPPACKETLENGTH 7824
 #define UDPHDRLEN 16 
+
+int lastPacket[4] = {0, 0, 0, 0};
 // Struct for header information
 struct header {
   int nchan,nsamp,nbit=0,nsub;
@@ -1200,43 +1202,54 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
   int beamletCount = rawBeamletCount * ports * bitmul;
   int scans = 16;
 
-  // nread_tmp=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub
-  int nread = fread(udpRawInput, sizeof(char), packetGulp * UDPPACKETLENGTH, rawfile);
 
   int *droppedPacketsIdx = (int *) calloc(packetGulp, sizeof(int));
   int droppedPackets = 0, currDroppedPacketIdx = 0, currDroppedPacket, i = 0;
+  
   long currPackNo, lastPackNo;
-  //unsgined int timestamp, sequence;
 
   char *bitwork;
   char *workingInput = udpRawInput;
   char workingChar;
 
-  for (int i = 1; i < packetGulp; i++) {
+  if (ftell(rawfile) != 0) {
+    lastPackNo = lastPacket[port];
+  } else lastPackNo = 0;
+
+  // nread_tmp=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub
+  int nread = fread(udpRawInput, sizeof(char), packetGulp * UDPPACKETLENGTH, rawfile);
+
+  int udpOffset;
+  for (int i = 0; i < packetGulp; i++) {
     //timestamp = (unsigned int) ((unsigned int ) <<16 | (unsigned int) );
     //sequence = (unsigned int) ((unsigned int ) <<16 | (unsigned int) );
-
+    udpOffset = i * UDPPACKETLENGTH;
     currPackNo = beamformed_packno(
-                      (unsigned int) ((unsigned int) udpRawInput[i * UDPPACKETLENGTH + 8] 
-                                    | (unsigned int) udpRawInput[i * UDPPACKETLENGTH + 9] <<8
-                                    | (unsigned int) udpRawInput[i * UDPPACKETLENGTH + 10] << 16
-                                    | (unsigned int) udpRawInput[i * UDPPACKETLENGTH + 11] << 24),
+                      (unsigned int) ((unsigned int) udpRawInput[udpOffset + 8] 
+                                    | (unsigned int) udpRawInput[udpOffset + 9] <<8
+                                    | (unsigned int) udpRawInput[udpOffset + 10] << 16
+                                    | (unsigned int) udpRawInput[udpOffset + 11] << 24),
 
-                      (unsigned int) ((unsigned int) udpRawInput[i * UDPPACKETLENGTH + 12]
-                                    | (unsigned int) udpRawInput[i * UDPPACKETLENGTH + 13] << 8
-                                    | (unsigned int) udpRawInput[i * UDPPACKETLENGTH + 14] << 16
-                                    | (unsigned int) udpRawInput[i * UDPPACKETLENGTH + 15] << 24));
+                      (unsigned int) ((unsigned int) udpRawInput[udpOffset + 12]
+                                    | (unsigned int) udpRawInput[udpOffset + 13] << 8
+                                    | (unsigned int) udpRawInput[udpOffset + 14] << 16
+                                    | (unsigned int) udpRawInput[udpOffset + 15] << 24));
 
     
     // Not going to handle the can of worms of out of sequence data...
     // Tested 300 seconds of packets and they were all in order; hopefully this holds true.
-    if ((currPackNo != (lastPackNo + 1l)) && (currPackNo > lastPackNo)) {
+    if ((currPackNo != (lastPackNo + 1l)) && (currPackNo > lastPackNo) && (lastPackNo != 0)) {
       printf("Possible dropped packet: %ld, %ld\n", currPackNo, lastPackNo);
       droppedPacketsIdx[droppedPackets] = i;
       droppedPackets++;
     }
 
     lastPackNo = currPackNo;
+
+    if ((i + droppedPackets) == packetGulp -1) {
+      lastPacket[port] = currPackNo;
+      break;
+    }
   }
 
   if (droppedPackets > 0) fseek(rawfile, -1 * UDPPACKETLENGTH * droppedPackets, SEEK_CUR);
@@ -1258,7 +1271,7 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
     // If we dropped a packet here, pad with the previous packet
     if (i == currDroppedPacket && i != 0) {
       i--;
-      currDroppedPacket = droppedPacketsIdx[++currDroppedPacketIdx];
+      currDroppedPacket = droppedPacketsIdx[currDroppedPacketIdx++];
     }
 
     baseOffset = udpPacketLength * i + udpHeaderLength;
