@@ -555,6 +555,10 @@ int main(int argc,char *argv[])
     free(cbuff);
     if (ndec > 1) cudaFree(dcbuff);
   }
+
+  if (rawudp) {
+    free(udpRawInput);
+  }
   cudaFree(dfbuf);
   cudaFree(cp1);
   cudaFree(cp2);
@@ -1194,6 +1198,11 @@ __global__ void decimate(float *z,int ndec,int nchan,int nblock,int nsum,float *
 }
 
 
+union char_unsigned_int {
+    unsigned int ui;
+    char c[4];
+};
+
 int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul, char* udpRawInput, char** udpbuf) {
 
   int udpPacketLength = UDPPACKETLENGTH * bitmul;
@@ -1212,6 +1221,9 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
   char *workingInput = udpRawInput;
   char workingChar;
 
+  union char_unsigned_int ts;
+  union char_unsigned_int seq;
+
   if (ftell(rawfile) != 0) {
     lastPackNo = lastPacket[port];
   } else lastPackNo = 0;
@@ -1219,34 +1231,33 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
   // nread_tmp=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub
   int nread = fread(udpRawInput, sizeof(char), packetGulp * UDPPACKETLENGTH, rawfile);
 
-  int udpOffset;
+  int udpOffset, packetIdx = 0, delta;
   for (int i = 0; i < packetGulp; i++) {
-    //timestamp = (unsigned int) ((unsigned int ) <<16 | (unsigned int) );
-    //sequence = (unsigned int) ((unsigned int ) <<16 | (unsigned int) );
     udpOffset = i * UDPPACKETLENGTH;
-    currPackNo = beamformed_packno(
-                      (unsigned int) ((unsigned int) udpRawInput[udpOffset + 8] 
-                                    | (unsigned int) udpRawInput[udpOffset + 9] <<8
-                                    | (unsigned int) udpRawInput[udpOffset + 10] << 16
-                                    | (unsigned int) udpRawInput[udpOffset + 11] << 24),
-
-                      (unsigned int) ((unsigned int) udpRawInput[udpOffset + 12]
-                                    | (unsigned int) udpRawInput[udpOffset + 13] << 8
-                                    | (unsigned int) udpRawInput[udpOffset + 14] << 16
-                                    | (unsigned int) udpRawInput[udpOffset + 15] << 24));
+    
+    ts.c[0] = udpRawInput[udpOffset + 8]; ts.c[1] = udpRawInput[udpOffset + 9]; ts.c[2] = udpRawInput[udpOffset + 10]; ts.c[3] = udpRawInput[udpOffset + 11];
+    seq.c[0] = udpRawInput[udpOffset + 12]; seq.c[1] = udpRawInput[udpOffset + 13]; seq.c[2] = udpRawInput[udpOffset + 14]; seq.c[3] = udpRawInput[udpOffset + 15];
+    
+    currPackNo = beamformed_packno(ts.ui, seq.ui);
 
     
     // Not going to handle the can of worms of out of sequence data...
     // Tested 300 seconds of packets and they were all in order; hopefully this holds true.
+    // If we assume we can only drop packets, this will work fine. If we have out of sequence data,
+    //  this may push us in the order direction and over-pad the dataset.
     if ((currPackNo != (lastPackNo + 1l)) && (currPackNo > lastPackNo) && (lastPackNo != 0)) {
-      printf("Possible dropped packet: %ld, %ld\n", currPackNo, lastPackNo);
-      droppedPacketsIdx[droppedPackets] = i;
-      droppedPackets++;
+      delta = (currPackNo - lastPackNo);
+      printf("Possible dropped packet (Port %d, Detla %d): %ld, %ld\n", port, delta, currPackNo, lastPackNo);
+      
+      droppedPacketsIdx[2 * packetIdx] = i;
+      droppedPacketsIdx[2 * packetIdx + 1] = delta;
+      droppedPackets += delta;
     }
 
     lastPackNo = currPackNo;
 
-    if ((i + droppedPackets) == packetGulp -1) {
+    // No point in processing if we have enough packets already
+    if ((i + droppedPackets) > packetGulp -1) {
       lastPacket[port] = currPackNo;
       break;
     }
@@ -1255,8 +1266,8 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
   if (droppedPackets > 0) fseek(rawfile, -1 * UDPPACKETLENGTH * droppedPackets, SEEK_CUR);
 
   if (bitmul == 2) {
-    bitwork = (char *) malloc(sizeof(char) * packetGulp * udpPacketLength);
-    for (int i = 0; i < (int) sizeof(char) * packetGulp * UDPPACKETLENGTH; i++) {
+    bitwork = (char *) malloc(sizeof(char) * (packetGulp - droppedPackets) * udpPacketLength);
+    for (int i = 0; i < (int) sizeof(char) * (packetGulp - droppedPackets) * UDPPACKETLENGTH; i++) {
         workingChar = udpRawInput[i];
         bitwork[2 * i]     = (workingChar & 240) >> 4;
         bitwork[2 * i + 1] = (workingChar & 15);
@@ -1269,9 +1280,9 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
   currDroppedPacket = droppedPacketsIdx[0];
   for (int iLoop = 0; iLoop < packetGulp; iLoop++) {
     // If we dropped a packet here, pad with the previous packet
-    if (i == currDroppedPacket && i != 0) {
+    if ((i == currDroppedPacket && i != 0)) {
       i--;
-      currDroppedPacket = droppedPacketsIdx[currDroppedPacketIdx++];
+      droppedPacketsIdx[currDroppedPacketIdx + 1]--;
     }
 
     baseOffset = udpPacketLength * i + udpHeaderLength;
@@ -1282,7 +1293,7 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
 
       for (int k = 0; k < scans; k++) {
         timeOffset = k * 4;
-        timeIdx = (i * scans + k) * beamletCount;
+        timeIdx = (iLoop * scans + k) * beamletCount;
 
         udpbuf[0][timeIdx + beamletBase + j] = workingInput[beamletIdx + timeOffset];
         udpbuf[1][timeIdx + beamletBase + j] = workingInput[beamletIdx + timeOffset + 1];
@@ -1292,25 +1303,22 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
     }
 
     i++;
+
+    if (droppedPacketsIdx[currDroppedPacketIdx + 1] == 0) {
+      currDroppedPacketIdx += 2;
+      currDroppedPacket = droppedPacketsIdx[currDroppedPacketIdx];
+    }
   }
 
   nread /= udpPacketLength;
   nread *= 16;
 
   free(droppedPacketsIdx);
+
+  if (bitmul == 2) free(bitwork);
+
   return nread;
 }
-
-/*
-
-
-  uint8_t   config;
-  uint16_t  station;
-  uint8_t   num_beamlets, num_slices;
-  int32_t  timestamp, sequence;
-
-};
-*/
 
 // Taken from Olaf Wulknitz's VLBI recorder
 long  __inline__ beamformed_packno(unsigned int timestamp, unsigned int sequence)
