@@ -18,7 +18,7 @@
 #define UDPPACKETLENGTH 7824
 #define UDPHDRLEN 16 
 
-int lastPacket[4] = {0, 0, 0, 0};
+long lastPacket[4] = {0, 0, 0, 0};
 // Struct for header information
 struct header {
   int nchan,nsamp,nbit=0,nsub;
