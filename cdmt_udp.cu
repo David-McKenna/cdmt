@@ -1247,7 +1247,7 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
     //  this may push us in the order direction and over-pad the dataset.
     if ((currPackNo != (lastPackNo + 1l)) && (currPackNo > lastPackNo) && (lastPackNo != 0)) {
       delta = (currPackNo - lastPackNo);
-      printf("Possible dropped packet (Port %d, Detla %d): %ld, %ld\n", port, delta, currPackNo, lastPackNo);
+      printf("Possible dropped packet (Port %d, Detla %d, Idx %d): %ld, %ld\n", port, delta, i, currPackNo, lastPackNo);
       
       droppedPacketsIdx[2 * packetIdx] = i;
       droppedPacketsIdx[2 * packetIdx + 1] = delta;
@@ -1258,10 +1258,11 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
 
     // No point in processing if we have enough packets already
     if ((i + droppedPackets) > packetGulp -1) {
-      lastPacket[port] = currPackNo;
       break;
     }
   }
+
+  lastPacket[port] = currPackNo;
 
   if (droppedPackets > 0) fseek(rawfile, -1 * UDPPACKETLENGTH * droppedPackets, SEEK_CUR);
 
