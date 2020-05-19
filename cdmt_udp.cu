@@ -1280,7 +1280,7 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
 
   if (bitmul == 2) {
     bitwork = (char *) malloc(sizeof(char) * (packetGulp - droppedPackets) * udpPacketLength);
-    for (int i = 0; i < (int) sizeof(char) * (packetGulp - droppedPackets) * UDPPACKETLENGTH; i++) {
+    for (i = 0; i < (int) sizeof(char) * (packetGulp - droppedPackets) * UDPPACKETLENGTH; i++) {
         workingChar = udpRawInput[i];
         bitwork[2 * i]     = (workingChar & 240) >> 4;
         bitwork[2 * i + 1] = (workingChar & 15);
