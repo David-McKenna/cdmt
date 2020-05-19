@@ -152,6 +152,7 @@ int main(int argc,char *argv[])
 
       case 'p':
   ports=atoi(optarg);
+  break;
 
       case 'h':
   usage();
@@ -1231,8 +1232,8 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
   // nread_tmp=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub
   int nread = fread(udpRawInput, sizeof(char), packetGulp * UDPPACKETLENGTH, rawfile);
 
-  int udpOffset, packetIdx = 0, delta;
-  for (int i = 0; i < packetGulp; i++) {
+  int udpOffset, packetIdx = 0, delta, i;
+  for (i = 0; i < packetGulp; i++) {
     udpOffset = i * UDPPACKETLENGTH;
     
     ts.c[0] = udpRawInput[udpOffset + 8]; ts.c[1] = udpRawInput[udpOffset + 9]; ts.c[2] = udpRawInput[udpOffset + 10]; ts.c[3] = udpRawInput[udpOffset + 11];
@@ -1247,24 +1248,35 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
     //  this may push us in the order direction and over-pad the dataset.
     if ((currPackNo != (lastPackNo + 1l)) && (currPackNo > lastPackNo) && (lastPackNo != 0)) {
       delta = (currPackNo - lastPackNo);
-      printf("Possible dropped packet (Port %d, Detla %d, Idx %d): %ld, %ld\n", port, delta, i, currPackNo, lastPackNo);
+      printf("Possible dropped packet (Port %d, Delta %d, Idx %d): %ld, %ld\n", port, delta, i, currPackNo, lastPackNo);
       
       droppedPacketsIdx[2 * packetIdx] = i;
       droppedPacketsIdx[2 * packetIdx + 1] = delta;
       droppedPackets += delta;
+    } else if (currPackNo < lastPackNo ) {
+      delta = (currPackNo - lastPackNo);
+      printf("Possible out of sequence packet (Port %d, Delta %d, Idx %d): %ld, %ld\n", port, delta, i, currPackNo, lastPackNo);
     }
 
     lastPackNo = currPackNo;
 
     // No point in processing if we have enough packets already
-    if ((i + droppedPackets) > packetGulp -1) {
+    if (!((i + droppedPackets) < (packetGulp))) {
       break;
     }
   }
 
-  lastPacket[port] = currPackNo;
 
-  if (droppedPackets > 0) fseek(rawfile, -1 * UDPPACKETLENGTH * droppedPackets, SEEK_CUR);
+  // Modify the last packet number to account for excess packet loss on the boundary
+  // Verify I got these offsets right...
+  if ((i + droppedPackets) >= (packetGulp)) {
+    lastPacket[port] = currPackNo - ((i + droppedPackets) - (packetGulp - 1));
+  } else {
+    lastPacket[port] = currPackNo;    
+  }
+  // And reverse the file pointer to account for the packets we didn't end up processing
+  if (droppedPackets > 0) fseek(rawfile, -1 * UDPPACKETLENGTH * (packetGulp - i + 1), SEEK_CUR);
+
 
   if (bitmul == 2) {
     bitwork = (char *) malloc(sizeof(char) * (packetGulp - droppedPackets) * udpPacketLength);
