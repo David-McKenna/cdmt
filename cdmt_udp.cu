@@ -1310,6 +1310,7 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
     baseOffset = udpPacketLength * i + udpHeaderLength;
     beamletBase = rawBeamletCount * port;
 
+    printf("%d, %d\n", baseOffset, beamletBase);
     for (int j = 0; j < rawBeamletCount; j++) {
       beamletIdx = baseOffset + j * scans * 4;
 
@@ -1331,14 +1332,14 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
       currDroppedPacket = droppedPacketsIdx[currDroppedPacketIdx];
     }
   }
-
+  printf("Exit main loop\n");
   nread /= udpPacketLength;
   nread *= 16;
 
   free(droppedPacketsIdx);
-
+  printf("Free bitmul\n");
   if (bitmul == 2) free(bitwork);
-
+  printf("End free\n");
   return nread;
 }
 
