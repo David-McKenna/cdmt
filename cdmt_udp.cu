@@ -1232,7 +1232,7 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
   // nread_tmp=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub
   int nread = fread(udpRawInput, sizeof(char), packetGulp * UDPPACKETLENGTH, rawfile);
 
-  int udpOffset, packetIdx = 0, delta, i;
+  int udpOffset, packetIdx = 0, delta;
   for (i = 0; i < packetGulp; i++) {
     udpOffset = i * UDPPACKETLENGTH;
     
