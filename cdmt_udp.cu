@@ -409,6 +409,8 @@ int main(int argc,char *argv[])
     if (verbose) printf("Skipping to timestep %ld (byte %ld ftell %ld)\n", ts_skip, bytes_skip, ftell(rawfile[i]));
   }
 
+  if (verbose) printf("Starting processing loop.\n");
+
   // Loop over input file contents
   for (iblock=0;;iblock++) {
     // Read block
