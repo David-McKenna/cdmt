@@ -410,7 +410,7 @@ int main(int argc,char *argv[])
     if (verbose) printf("Skipping to timestep %ld (byte %ld ftell %ld)\n", ts_skip, bytes_skip, ftell(rawfile[i]));
   }
 
-  if (verbose) printf("Starting processing loop.\n");
+  if (verbose) printf("Starting processing loop.\n\n");
 
   // Loop over input file contents
   for (iblock=0;;iblock++) {
@@ -1281,6 +1281,7 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
 
 
 
+  printf("4-bit start\n");
   if (bitmul == 2) {
     bitwork = (char *) malloc(sizeof(char) * (packetGulp - droppedPackets) * udpPacketLength);
     for (i = 0; i < (int) sizeof(char) * (packetGulp - droppedPackets) * UDPPACKETLENGTH; i++) {
@@ -1291,6 +1292,7 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
 
     workingInput = bitwork;
   }
+  printf("4-bit end\n");
   
   int baseOffset, beamletBase, beamletIdx, timeOffset, timeIdx;
   currDroppedPacket = droppedPacketsIdx[0];
@@ -1326,13 +1328,13 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
       currDroppedPacket = droppedPacketsIdx[currDroppedPacketIdx];
     }
   }
-
+  printf("Loop end\n");
   nread /= UDPPACKETLENGTH;
   nread *= 16;
 
   free(droppedPacketsIdx);
   if (bitmul == 2) free(bitwork);
-
+  printf("Free end\n");
   return nread;
 }
 
