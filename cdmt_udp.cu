@@ -293,7 +293,7 @@ int main(int argc,char *argv[])
   char *udpRawInput;
   int packetGulp = nsamp / 16;
   if (rawudp) {
-    udpRawInput = (char *) malloc(sizeof(char) * packetGulp * UDPPACKETLENGTH * bitmul);
+    udpRawInput = (char *) malloc(sizeof(char) * packetGulp * UDPPACKETLENGTH);
   }
 
   // Set device
@@ -1214,7 +1214,7 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
   int udpPacketLength = UDPPACKETLENGTH * bitmul;
   int udpHeaderLength = UDPHDRLEN * bitmul;
   int rawBeamletCount = 122 * bitmul;
-  int beamletCount = rawBeamletCount * ports * bitmul;
+  int beamletCount = rawBeamletCount * ports;
   int scans = 16;
 
 
