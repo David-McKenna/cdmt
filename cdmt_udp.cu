@@ -1281,7 +1281,6 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
 
 
 
-  printf("4-bit start\n");
   if (bitmul == 2) {
     bitwork = (char *) malloc(sizeof(char) * packetGulp * udpPacketLength);
     for (i = 0; i < (int) sizeof(char) * packetGulp * UDPPACKETLENGTH; i++) {
@@ -1292,7 +1291,7 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
 
     workingInput = bitwork;
   }
-  printf("4-bit end\n");
+
   
   int baseOffset, beamletBase, beamletIdx, timeOffset, timeIdx;
   currDroppedPacket = droppedPacketsIdx[0];
@@ -1306,7 +1305,7 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
 
     baseOffset = udpPacketLength * i + udpHeaderLength;
     beamletBase = rawBeamletCount * port;
-    if (baseOffset > 320000000) printf("%d\n", baseOffset);
+
     for (int j = 0; j < rawBeamletCount; j++) {
       beamletIdx = baseOffset + j * scans * 4;
 
@@ -1328,13 +1327,13 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
       currDroppedPacket = droppedPacketsIdx[currDroppedPacketIdx];
     }
   }
-  printf("Loop end\n");
+
   nread /= UDPPACKETLENGTH;
   nread *= 16;
 
   free(droppedPacketsIdx);
   if (bitmul == 2) free(bitwork);
-  printf("Free end\n");
+
   return nread;
 }
 
