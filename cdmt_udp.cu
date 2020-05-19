@@ -28,6 +28,7 @@ struct header {
   char *rawfname[4];
 };
 
+
 struct header read_sigproc_header(char *fname, char *dataname, int rawudp, int ports);
 void get_channel_chirp(double fcen,double bw,float dm,int nchan,int nbin,int nsub,cufftComplex *c);
 __global__ void transpose_unpadd_and_detect(cufftComplex *cp1,cufftComplex *cp2,int nbin,int nchan,int nfft,int nsub,int noverlap,int nsamp,float *fbuf);
@@ -1221,7 +1222,7 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
   
   long currPackNo, lastPackNo;
 
-  char *bitwork;
+  unsigned char *bitwork;
   char *workingInput = udpRawInput;
   char workingChar;
 
@@ -1273,14 +1274,14 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
 
 
   if (bitmul == 2) {
-    bitwork = (char *) malloc(sizeof(char) * packetGulp * udpPacketLength);
+    bitwork = (unsigned char *) malloc(sizeof(unsigned char) * packetGulp * udpPacketLength);
     for (i = 0; i < (int) sizeof(char) * packetGulp * UDPPACKETLENGTH; i++) {
         workingChar = udpRawInput[i];
         bitwork[2 * i]     = (workingChar & 240) >> 4;
         bitwork[2 * i + 1] = (workingChar & 15);
     }
 
-    workingInput = bitwork;
+    workingInput = (char *) bitwork;
   }
 
   
