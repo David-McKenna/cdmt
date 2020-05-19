@@ -1297,7 +1297,7 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
     workingInput = bitwork;
   }
   
-  printf("Enter main loop\n");
+  printf("Enter main loop %d, %d\n", udpPacketLength, udpHeaderLength);
   int baseOffset, beamletBase, beamletIdx, timeOffset, timeIdx;
   currDroppedPacket = droppedPacketsIdx[0];
   for (int iLoop = 0; iLoop < packetGulp; iLoop++) {
