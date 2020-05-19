@@ -1251,33 +1251,24 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
     //  this may push us in the order direction and over-pad the dataset.
     if ((currPackNo != (lastPackNo + 1l)) && (currPackNo > lastPackNo) && (lastPackNo != 0)) {
       delta = (currPackNo - lastPackNo);
-      printf("Possible dropped packet (Port %d, Delta %d, Idx %d): %ld, %ld\n", port, delta, i, currPackNo, lastPackNo);
+      printf("Possible dropped packet (Port %d, Detla %d, Idx %d): %ld, %ld\n", port, delta, i, currPackNo, lastPackNo);
       
       droppedPacketsIdx[2 * packetIdx] = i;
       droppedPacketsIdx[2 * packetIdx + 1] = delta;
       droppedPackets += delta;
-    } else if (currPackNo < lastPackNo ) {
-      delta = (currPackNo - lastPackNo);
-      printf("Possible out of sequence packet (Port %d, Delta %d, Idx %d): %ld, %ld\n", port, delta, i, currPackNo, lastPackNo);
     }
 
     lastPackNo = currPackNo;
 
     // No point in processing if we have enough packets already
-    if (!((i + droppedPackets) < (packetGulp))) {
+    if ((i + droppedPackets) > packetGulp -1) {
       break;
     }
   }
 
-  // Modify the last packet number to account for excess packet loss on the boundary
-  // Verify I got these offsets right...
-  if ((i + droppedPackets) >= (packetGulp)) {
-    lastPacket[port] = currPackNo - ((i + droppedPackets) - (packetGulp - 1));
-  } else {
-    lastPacket[port] = currPackNo;    
-  }
-  // And reverse the file pointer to account for the packets we didn't end up processing
-  if (droppedPackets > 0) fseek(rawfile, -1 * UDPPACKETLENGTH * (packetGulp - i + 1), SEEK_CUR);
+  lastPacket[port] = currPackNo;
+
+  if (droppedPackets > 0) fseek(rawfile, -1 * UDPPACKETLENGTH * droppedPackets, SEEK_CUR);
 
 
 
