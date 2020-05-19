@@ -1300,6 +1300,7 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
   printf("Enter main loop %d, %d\n", udpPacketLength, udpHeaderLength);
   int baseOffset, beamletBase, beamletIdx, timeOffset, timeIdx;
   currDroppedPacket = droppedPacketsIdx[0];
+  i = 0;
   for (int iLoop = 0; iLoop < packetGulp; iLoop++) {
     // If we dropped a packet here, pad with the previous packet
     if ((i == currDroppedPacket && i != 0)) {
