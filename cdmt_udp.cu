@@ -293,7 +293,7 @@ int main(int argc,char *argv[])
   char *udpRawInput;
   int packetGulp = nsamp / 16;
   if (rawudp) {
-    udpRawInput = (char *) malloc(sizeof(char) * packetGulp * UDPPACKETLENGTH);
+    udpRawInput = (char *) malloc(sizeof(char) * packetGulp * UDPPACKETLENGTH * bitmul);
   }
 
   // Set device
