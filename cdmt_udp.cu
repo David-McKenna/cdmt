@@ -1288,7 +1288,7 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
   printf("Enter 4-bit loop\n");
   if (bitmul == 2) {
     bitwork = (char *) malloc(sizeof(char) * (packetGulp - droppedPackets) * udpPacketLength);
-    printf("Alloc'd %d bytes\n", sizeof(char) * (packetGulp - droppedPackets) * udpPacketLength);
+    printf("Alloc'd %ld bytes\n", sizeof(char) * (packetGulp - droppedPackets) * udpPacketLength);
     for (i = 0; i < (int) sizeof(char) * (packetGulp - droppedPackets) * UDPPACKETLENGTH; i++) {
         workingChar = udpRawInput[i];
         bitwork[2 * i]     = (workingChar & 240) >> 4;
@@ -1312,7 +1312,7 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
     baseOffset = udpPacketLength * i + udpHeaderLength;
     beamletBase = rawBeamletCount * port;
 
-    printf("%d, %d\n", baseOffset, beamletBase);
+    if (i % 10000 == 0) printf("%d, %d\n", baseOffset, beamletBase);
     for (int j = 0; j < rawBeamletCount; j++) {
       beamletIdx = baseOffset + j * scans * 4;
 
