@@ -1210,7 +1210,7 @@ union char_unsigned_int {
 };
 
 int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul, char* udpRawInput, char** udpbuf) {
-  if (verbose) printf("Reshaping UDP from port %d of ports %d. ngulp=%d, bitmul=%d\n", port, ports, ngulp, bitmul);
+  printf("Reshaping UDP from port %d of ports %d. ngulp=%d, bitmul=%d\n", port, ports, packetGulp, bitmul);
   int udpPacketLength = UDPPACKETLENGTH * bitmul;
   int udpHeaderLength = UDPHDRLEN * bitmul;
   int rawBeamletCount = 122 * bitmul;
