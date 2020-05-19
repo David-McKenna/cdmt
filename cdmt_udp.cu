@@ -1306,7 +1306,7 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
 
     baseOffset = udpPacketLength * i + udpHeaderLength;
     beamletBase = rawBeamletCount * port;
-    if (beamOffset > 320000000) printf("%d\n", baseOffset);
+    if (baseOffset > 320000000) printf("%d\n", baseOffset);
     for (int j = 0; j < rawBeamletCount; j++) {
       beamletIdx = baseOffset + j * scans * 4;
 
