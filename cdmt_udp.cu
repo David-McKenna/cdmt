@@ -1209,8 +1209,8 @@ union char_unsigned_int {
     char c[4];
 };
 
-#define HI_NIBBLE(b) (((b) >> 4) & 0x0F)
-#define LO_NIBBLE(b) ((b) & 0x0F)
+#define HI_NIBBLE(b) ((((b) >> 4) & 0x0F) + (b & 0x80))
+#define LO_NIBBLE(b) (((b) & 0x0F) + ((b & 0x08) << 4))
 
 int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul, char* udpRawInput, char** udpbuf) {
   int udpPacketLength = UDPPACKETLENGTH * bitmul;
