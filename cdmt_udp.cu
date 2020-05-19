@@ -1234,9 +1234,11 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
     lastPackNo = lastPacket[port];
   } else lastPackNo = 0;
 
+  printf("Read data\n");
   // nread_tmp=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub
   int nread = fread(udpRawInput, sizeof(char), packetGulp * UDPPACKETLENGTH, rawfile);
 
+  printf("Handle packet loss\n");
   int udpOffset, packetIdx = 0, delta;
   for (i = 0; i < packetGulp; i++) {
     udpOffset = i * UDPPACKETLENGTH;
@@ -1271,7 +1273,7 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
     }
   }
 
-
+  printf("Modify last port\n");
   // Modify the last packet number to account for excess packet loss on the boundary
   // Verify I got these offsets right...
   if ((i + droppedPackets) >= (packetGulp)) {
@@ -1283,6 +1285,7 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
   if (droppedPackets > 0) fseek(rawfile, -1 * UDPPACKETLENGTH * (packetGulp - i + 1), SEEK_CUR);
 
 
+  printf("Enter 4-bit loop\n");
   if (bitmul == 2) {
     bitwork = (char *) malloc(sizeof(char) * (packetGulp - droppedPackets) * udpPacketLength);
     for (i = 0; i < (int) sizeof(char) * (packetGulp - droppedPackets) * UDPPACKETLENGTH; i++) {
@@ -1294,6 +1297,7 @@ int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul
     workingInput = bitwork;
   }
   
+  printf("Enter main loop\n");
   int baseOffset, beamletBase, beamletIdx, timeOffset, timeIdx;
   currDroppedPacket = droppedPacketsIdx[0];
   for (int iLoop = 0; iLoop < packetGulp; iLoop++) {
