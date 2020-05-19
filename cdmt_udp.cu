@@ -402,6 +402,7 @@ int main(int argc,char *argv[])
 
   // Read files
   for (i=0;i<ports;i++) {
+    if (verbose) printf("Opening file for port %d\n", i);
     rawfile[i]=fopen(hdr.rawfname[i],"r");
     if (bytes_skip > 0)
       fseek(rawfile[i],bytes_skip,SEEK_SET);
@@ -419,7 +420,9 @@ int main(int argc,char *argv[])
     for (i=0;i<ports;i++) {
 
       if (rawudp) {
+        if (verbose) printf("Call udp reshaper\n");
         nread_tmp = reshapeRawUdp(rawfile[i], packetGulp, i, ports, bitmul, udpRawInput, udpbuf);
+        if (verbose) printf("Exit udp reshaper\n");
       } else nread_tmp=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub;
 
       if (nread > nread_tmp) {
@@ -1207,7 +1210,7 @@ union char_unsigned_int {
 };
 
 int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul, char* udpRawInput, char** udpbuf) {
-
+  if (verbose) printf("Reshaping UDP from port %d of ports %d. ngulp=%d, bitmul=%d\n", port, ports, ngulp, bitmul);
   int udpPacketLength = UDPPACKETLENGTH * bitmul;
   int udpHeaderLength = UDPHDRLEN * bitmul;
   int rawBeamletCount = 122 * bitmul;
