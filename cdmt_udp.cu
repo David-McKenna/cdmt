@@ -12,6 +12,8 @@
 #include <getopt.h>
 #include <limits.h>
 
+#include "/home/suddenly/git/udpManager/lofar_udp_reader.h"
+
 #define HEADERSIZE 4096
 #define DMCONSTANT 2.41e-10
 
@@ -21,11 +23,11 @@
 long lastPacket[4] = {0, 0, 0, 0};
 // Struct for header information
 struct header {
-  int nchan,nsamp,nbit=0,nsub;
+  int nchan,nbit=0,nsub;
   double tstart,tsamp,fch1,foff,fcen,bwchan;
   double src_raj,src_dej;
   char source_name[80];
-  char *rawfname[4];
+  char rawfname[4][1024];
 };
 
 
@@ -45,9 +47,13 @@ __global__ void redigitize(float *z,int nchan,int nblock,int nsum,float *zavg,fl
 __global__ void decimate_and_redigitize(float *z,int ndec,int nchan,int nblock,int nsum,float *zavg,float *zstd,float zmin,float zmax,unsigned char *cz);
 __global__ void decimate(float *z,int ndec,int nchan,int nblock,int nsum,float *cz);
 void write_filterbank_header(struct header h,FILE *file);
-int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul, char* udpRawInput, char** udpbuf);
+int reshapeRawUdp(lofar_udp_reader *reader);
 long  __inline__ beamformed_packno(unsigned int timestamp, unsigned int sequence);
 
+extern "C"  {
+  int lofar_udp_reader_step(lofar_udp_reader *reader);
+  lofar_udp_reader* lofar_udp_meta_file_reader_setup(FILE **inputFiles, const int numPorts, const int replayDroppedPackets, const int processingMode, const int verbose, const long packetsPerIteration, const long startingPacket, const long packetsReadMax, const int compressedReader);
+}
 // Usage
 void usage()
 {
@@ -94,6 +100,8 @@ int main(int argc,char *argv[])
   int arg=0;
   FILE **outfile;
   double timeInSeconds;
+
+  lofar_udp_reader *reader;
 
   // Read options
   if (argc>1) {
@@ -197,6 +205,12 @@ int main(int argc,char *argv[])
     sprintf(sphdrfname, "%s.sigprochdr", udpfname);
   }
 
+  FILE* inputFiles[4];
+  int compressedInput = 0;
+  char tmpfname[1024] = "";
+  if (strstr(udpfname, "zst") != NULL) compressedInput = 1;
+
+
   if (verbose) {
     printf("Forward FFT Size:\t%d\n", nbin);
     printf("Overlap size:\t%d\n", noverlap);
@@ -214,9 +228,22 @@ int main(int argc,char *argv[])
   // Read sigproc header
   struct header hdr = read_sigproc_header(sphdrfname, udpfname, rawudp, ports);
 
+  for (int i = 0; i < 4; i++) {
+    sprintf(tmpfname, udpfname, i);
+    printf("Opening %s...\n", tmpfname);
+
+    inputFiles[i] = fopen(tmpfname, "r");
+
+    if (inputFiles[i] == NULL) {
+      printf("Input file failed to open (null pointer)\n");
+    }
+
+    strcpy(hdr.rawfname[i],tmpfname);
+  }
+
   if (verbose) {
     printf("====ORIGINAL HEADER INFORMATION====\n");
-    printf("nsub: %d, nsamp: %d, nbit: %d, nchan %d\n", hdr.nsub, hdr.nsamp, hdr.nbit, hdr.nchan);
+    printf("nsub: %d, nbit: %d, nchan %d\n", hdr.nsub, hdr.nbit, hdr.nchan);
     printf("tstart: %lf\n", hdr.tstart);
     printf("tsamp: %.08lf\n", hdr.tsamp);
     printf("fch1: %lf\n", hdr.fch1);
@@ -265,7 +292,7 @@ int main(int argc,char *argv[])
 
   if (verbose) {
     printf("====NEW HEADER INFORMATION====\n");
-    printf("nsub: %d, nsamp: %d, nbit: %d, nchan %d\n", hdr.nsub, hdr.nsamp, hdr.nbit, hdr.nchan);
+    printf("nsub: %d, nbit: %d, nchan %d\n", hdr.nsub, hdr.nbit, hdr.nchan);
     printf("tstart: %lf\n", hdr.tstart);
     printf("tsamp: %.08lf\n", hdr.tsamp);
     printf("fch1: %lf\n", hdr.fch1);
@@ -292,11 +319,9 @@ int main(int argc,char *argv[])
     printf("msamp: %d mblock: %d mchan: %d\n", msamp, mblock, mchan);
   }
 
-  char *udpRawInput;
-  int packetGulp = nsamp / 16;
-  if (rawudp) {
-    udpRawInput = (char *) malloc(sizeof(char) * packetGulp * UDPPACKETLENGTH);
-  }
+  const long packetGulp = nsamp / 16;
+  reader = lofar_udp_meta_file_reader_setup(inputFiles, ports, 1, 11, 1, packetGulp, (long) -1, LONG_MAX, compressedInput);
+  if (verbose) printf("lofar_udp_reader Generated successfully.\n");
 
   // Set device
   checkCudaErrors(cudaSetDevice(device));
@@ -335,7 +360,7 @@ int main(int argc,char *argv[])
   // Allocate memory for redigitized output and header
   header=(char *) malloc(sizeof(char)*HEADERSIZE);
   for (i=0;i<4;i++) {
-    udpbuf[i]=(char *) malloc(sizeof(char)*nsamp*nsub);
+    udpbuf[i]= reader->meta->outputData[i];
     checkCudaErrors(cudaMalloc((void **) &dudpbuf[i], (size_t) sizeof(char)*nsamp*nsub));
   }
 
@@ -362,12 +387,12 @@ int main(int argc,char *argv[])
 
   // Allow memory alloation/copy actions to finish before processing
   cudaDeviceSynchronize();
-
+  if (verbose) printf("Malloc complete.\n");
   // Compute chirp
   blocksize.x=32; blocksize.y=32; blocksize.z=1;
   gridsize.x=nsub/blocksize.x+1; gridsize.y=nchan/blocksize.y+1; gridsize.z=ndm/blocksize.z+1;
   compute_chirp<<<gridsize,blocksize>>>(hdr.fcen,nsub*hdr.bwchan,ddm,nchan,nbin,nsub,ndm,dc);
-
+  if (verbose) printf("Chirp calculated.\n");
   // Write temporary filterbank header
   file=fopen("/tmp/header.fil","w");
   if (file == NULL) {
@@ -395,14 +420,15 @@ int main(int argc,char *argv[])
       exit(1);
     }
   }
-  
+  if (verbose) printf("Output header generated successfully.\n");
   // Write headers
   for (idm=0;idm<ndm;idm++) {
     // Send header
     fwrite(fheader,sizeof(char),bytes_read,outfile[idm]);
   }
-
+  if (verbose) printf("Output header written successfully.\n");
   // Read files
+  /*
   for (i=0;i<ports;i++) {
     if (verbose) printf("Opening file for port %d\n", i);
     rawfile[i]=fopen(hdr.rawfname[i],"r");
@@ -412,6 +438,9 @@ int main(int argc,char *argv[])
     if (verbose) printf("Skipping to timestep %ld (byte %ld ftell %ld)\n", ts_skip, bytes_skip, ftell(rawfile[i]));
   }
 
+  */
+  printf("TODO: reimplement offset seek\n");
+
   if (verbose) printf("Starting processing loop.\n\n");
 
   // Loop over input file contents
@@ -419,19 +448,19 @@ int main(int argc,char *argv[])
     // Read block
     nread = INT_MAX;
     startclock=clock();
-    for (i=0;i<ports;i++) {
 
-      if (rawudp) {
-        nread_tmp = reshapeRawUdp(rawfile[i], packetGulp, i, ports, bitmul, udpRawInput, udpbuf);
 
-      } else nread_tmp=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub;
+    if (rawudp) {
+      nread_tmp = reshapeRawUdp(reader);
 
-      if (nread > nread_tmp) {
-        nread = nread_tmp;
+    } else nread_tmp=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub;
 
-        if (i != 0 && nread != nsamp) printf("File %d returned less data than expected.\n", i);
-      }
+    if (nread > nread_tmp) {
+      nread = nread_tmp;
+
+      if (i != 0 && nread != nsamp) printf("File %d returned less data than expected.\n", i);
     }
+
     if (nread==0) {
       printf("No data read from last file; assuming EOF, finishng up.\n");
       break;
@@ -525,8 +554,8 @@ int main(int argc,char *argv[])
       // Write buffer
     }
     printf("Processed %d DMs in %.2f s\n",ndm,(float) (clock()-startclock)/CLOCKS_PER_SEC);
-    timeInSeconds = (double) ftell(rawfile[0]) * timeOffset;
-    printf("Current file position: %02ld:%02ld:%05.2lf (%1.2lfs)\n\n", (long int) (timeInSeconds / 3600.0), (long int) ((fmod(timeInSeconds, 3600.0)) / 60.0), fmod(timeInSeconds, 60.0), timeInSeconds);
+    timeInSeconds += (double) nread * timeOffset;
+    printf("Current data processed: %02ld:%02ld:%05.2lf (%1.2lfs)\n\n", (long int) (timeInSeconds / 3600.0), (long int) ((fmod(timeInSeconds, 3600.0)) / 60.0), fmod(timeInSeconds, 60.0), timeInSeconds);
     // Exit when we pass the read length limit
     if (total_ts_read > ts_read)
       break;
@@ -543,7 +572,6 @@ int main(int argc,char *argv[])
   // Free
   free(header);
   for (i=0;i<4;i++) {
-    free(udpbuf[i]);
     cudaFree(dudpbuf);
     free(hdr.rawfname[i]);
   }
@@ -563,9 +591,6 @@ int main(int argc,char *argv[])
     if (ndec > 1) cudaFree(dcbuff);
   }
 
-  if (rawudp) {
-    free(udpRawInput);
-  }
   cudaFree(dfbuf);
   cudaFree(cp1);
   cudaFree(cp2);
@@ -760,7 +785,6 @@ struct header read_sigproc_header(char *fname, char *dataname, int rawudp, int p
 {
 
   char ftest[2048];
-  int i;
   FILE *tmpf;
 
   tmpf = fopen(fname, "r");
@@ -772,45 +796,11 @@ struct header read_sigproc_header(char *fname, char *dataname, int rawudp, int p
   fclose(tmpf);
 
 
-  // Check files
-  for (i=0;i<ports;i++) {
-    // Format file name
-    if (rawudp) {
-      sprintf(ftest,"%s_S%d",dataname,i);
-    } else {
-      sprintf(ftest,"%s_S%d.rawfil",dataname,i);
-    }
-    // Try to open
-    if ((tmpf=fopen(ftest,"r"))!=NULL) {
-      fclose(tmpf);
-    } else {
-      fprintf(stderr,"Raw file %s not found\n",ftest);
-      exit (-1);
-    }
-
-    if (rawudp) hdr.rawfname[i]=(char *) malloc(sizeof(char) * strlen(dataname) + sizeof(char)*(3));
-    else hdr.rawfname[i]=(char *) malloc(sizeof(char) * strlen(dataname) + sizeof(char)*(9));
-
-    strcpy(hdr.rawfname[i],ftest);
-  }
-
-  tmpf = fopen(hdr.rawfname[0], "r");
-  fseek(tmpf, 0, SEEK_END);
-  long int charSize = ftell(tmpf);
-  fclose(tmpf);
-
-
 
   hdr.fcen = hdr.fch1 + (hdr.foff * hdr.nsub * 0.5);
   hdr.bwchan = fabs(hdr.foff);
 
-  if (rawudp) {
-    hdr.nsamp = (int) (charSize / UDPPACKETLENGTH);
-  } else {
-    hdr.nsamp = (int) (charSize / hdr.nsub / ((float) (hdr.nbit) / (float) 8));
-  }
-
-  return hdr;
+ return hdr;
 }
 
 // Scale cufftComplex 
@@ -1204,136 +1194,17 @@ __global__ void decimate(float *z,int ndec,int nchan,int nblock,int nsum,float *
   return;
 }
 
-union char_unsigned_int {
-    unsigned int ui;
-    char c[4];
-};
+int reshapeRawUdp(lofar_udp_reader *reader) {
 
-#define HI_NIBBLE(b) ((((b) >> 4) & 0x0F) + (b & 0x80))
-#define LO_NIBBLE(b) (((b) & 0x0F) + ((b & 0x08) << 4))
+  if (lofar_udp_reader_step(reader) > 0) return 0;
+  int nread = reader->meta->packetsPerIteration;
 
-int reshapeRawUdp(FILE* rawfile, int packetGulp, int port, int ports, int bitmul, char* udpRawInput, char** udpbuf) {
-  int udpPacketLength = UDPPACKETLENGTH * bitmul;
-  int udpHeaderLength = UDPHDRLEN * bitmul;
-  int rawBeamletCount = 122 * bitmul;
-  int beamletCount = rawBeamletCount * ports;
-  int scans = 16;
+  for (int i = 0; i < 4; i++) printf("%d, ", reader->meta->portLastDroppedPackets[i]);
+  printf("\n");
 
+ // MODE 11
 
-  int *droppedPacketsIdx = (int *) calloc(packetGulp, sizeof(int));
-  int droppedPackets = 0, currDroppedPacketIdx = 0, currDroppedPacket, i = 0;
-  
-  long currPackNo, lastPackNo;
-
-  char *bitwork;
-  char *workingInput = udpRawInput;
-  unsigned char workingChar;
-
-  union char_unsigned_int ts;
-  union char_unsigned_int seq;
-
-  if (ftell(rawfile) != 0) {
-    lastPackNo = lastPacket[port];
-  } else lastPackNo = 0;
-
-  // nread_tmp=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub
-  int nread = fread(udpRawInput, sizeof(char), packetGulp * UDPPACKETLENGTH, rawfile);
-
-  int udpOffset, packetIdx = 0, delta;
-  for (i = 0; i < packetGulp; i++) {
-    udpOffset = i * UDPPACKETLENGTH;
-    
-    ts.c[0] = udpRawInput[udpOffset + 8]; ts.c[1] = udpRawInput[udpOffset + 9]; ts.c[2] = udpRawInput[udpOffset + 10]; ts.c[3] = udpRawInput[udpOffset + 11];
-    seq.c[0] = udpRawInput[udpOffset + 12]; seq.c[1] = udpRawInput[udpOffset + 13]; seq.c[2] = udpRawInput[udpOffset + 14]; seq.c[3] = udpRawInput[udpOffset + 15];
-    
-    currPackNo = beamformed_packno(ts.ui, seq.ui);
-
-    
-    // Not going to handle the can of worms of out of sequence data...
-    // Tested 300 seconds of packets and they were all in order; hopefully this holds true.
-    // If we assume we can only drop packets, this will work fine. If we have out of sequence data,
-    //  this may push us in the order direction and over-pad the dataset.
-    if ((currPackNo != (lastPackNo + 1l)) && (currPackNo > lastPackNo) && (lastPackNo != 0)) {
-      delta = (currPackNo - lastPackNo);
-      printf("Possible dropped packet (Port %d, Detla %d, Idx %d): %ld, %ld\n", port, delta, i, currPackNo, lastPackNo);
-      
-      droppedPacketsIdx[2 * packetIdx] = i;
-      droppedPacketsIdx[2 * packetIdx + 1] = delta;
-      droppedPackets += delta;
-    }
-
-    lastPackNo = currPackNo;
-
-    // No point in processing if we have enough packets already
-    if ((i + droppedPackets) > packetGulp -1) {
-      break;
-    }
-  }
-
-  lastPacket[port] = currPackNo;
-
-  if (droppedPackets > 0) fseek(rawfile, -1 * UDPPACKETLENGTH * droppedPackets, SEEK_CUR);
-
-
-
-  if (bitmul == 2) {
-    bitwork = (char *) malloc(sizeof(char) * packetGulp * udpPacketLength);
-    for (i = 0; i < (int) sizeof(char) * packetGulp * UDPPACKETLENGTH; i++) {
-        workingChar = udpRawInput[i];
-        bitwork[2 * i]     = HI_NIBBLE(workingChar);
-        bitwork[2 * i + 1] = LO_NIBBLE(workingChar);
-    }
-
-    workingInput = bitwork;
-  }
-
-  
-  int baseOffset, beamletBase, beamletIdx, timeOffset, timeIdx;
-  currDroppedPacket = droppedPacketsIdx[0];
-  i = 0;
-  for (int iLoop = 0; iLoop < packetGulp; iLoop++) {
-    // If we dropped a packet here, pad with the previous packet
-    if ((i == currDroppedPacket && i != 0)) {
-      i--;
-      droppedPacketsIdx[currDroppedPacketIdx + 1]--;
-    }
-
-    baseOffset = udpPacketLength * i + udpHeaderLength;
-    beamletBase = rawBeamletCount * port;
-
-    for (int j = 0; j < rawBeamletCount; j++) {
-      beamletIdx = baseOffset + j * scans * 4;
-
-      for (int k = 0; k < scans; k++) {
-        timeOffset = k * 4;
-        timeIdx = (iLoop * scans + k) * beamletCount;
-
-        udpbuf[0][timeIdx + beamletBase + j] = workingInput[beamletIdx + timeOffset];
-        udpbuf[1][timeIdx + beamletBase + j] = workingInput[beamletIdx + timeOffset + 1];
-        udpbuf[2][timeIdx + beamletBase + j] = workingInput[beamletIdx + timeOffset + 2];
-        udpbuf[3][timeIdx + beamletBase + j] = workingInput[beamletIdx + timeOffset + 3];
-      }
-    }
-
-    i++;
-
-    if (droppedPacketsIdx[currDroppedPacketIdx + 1] == 0) {
-      currDroppedPacketIdx += 2;
-      currDroppedPacket = droppedPacketsIdx[currDroppedPacketIdx];
-    }
-  }
-
-  nread /= UDPPACKETLENGTH;
   nread *= 16;
 
-  free(droppedPacketsIdx);
-  if (bitmul == 2) free(bitwork);
-
   return nread;
-}
-
-// Taken from Olaf Wulknitz's VLBI recorder
-long  __inline__ beamformed_packno(unsigned int timestamp, unsigned int sequence)
-{
-  return ((timestamp*1000000l*200+512)/1024+sequence)/16;
 }
