@@ -32,7 +32,7 @@ struct header {
 
 
 
-struct header read_sigproc_header(char *fname, char *dataname, int rawudp, int ports);
+struct header read_sigproc_header(char *fname, char *dataname, int ports);
 void get_channel_chirp(double fcen,double bw,float dm,int nchan,int nbin,int nsub,cufftComplex *c);
 __global__ void transpose_unpadd_and_detect(cufftComplex *cp1,cufftComplex *cp2,int nbin,int nchan,int nfft,int nsub,int noverlap,int nsamp,float *fbuf);
 static __device__ __host__ inline cufftComplex ComplexScale(cufftComplex a,float s);
@@ -81,7 +81,7 @@ int main(int argc,char *argv[])
   int i,nsamp,nfft,mbin,nvalid,nchan=8,nbin=65536,noverlap=2048,nsub=20,ndm,ndec=1;
   int idm,iblock,nread_tmp,nread,mchan,msamp,mblock,msum=1024;
   char *header,*udpbuf[4],*dudpbuf[4];
-  FILE *rawfile[4],*file;
+  FILE *file;
   unsigned char *cbuf,*dcbuf;
   float *cbuff, *dcbuff;
   float *fbuf,*dfbuf;
@@ -96,7 +96,7 @@ int main(int argc,char *argv[])
   int bytes_read;
   long int ts_read=LONG_MAX,ts_skip=0;
   long int total_ts_read=0,bytes_skip=0;
-  int part=0,device=0,verbose=0,nforward=128,redig=1,rawudp=0,ports=4,bitmul=1;
+  int part=0,device=0,verbose=0,nforward=128,redig=1,ports=4;
   int arg=0;
   FILE **outfile;
   double timeInSeconds;
@@ -141,7 +141,7 @@ int main(int argc,char *argv[])
   break;
   
       case 'r':
-  ts_read=atol(optarg);
+  ts_read=atol(optarg) / 16;
   break;
 
       case 'f':
@@ -154,10 +154,6 @@ int main(int argc,char *argv[])
 
       case 'v':
   verbose=1;
-  break;
-
-      case 'u':
-  rawudp=1;
   break;
 
       case 'p':
@@ -177,11 +173,6 @@ int main(int argc,char *argv[])
     return 0;
   }
   udpfname=argv[optind];
-
-  if (ports !=4 && !rawudp) {
-    fprintf(stderr, "WARNING: the '-p' flag is only meant for use in conjunction with the '-u' flag, resetting ports to 4.\n");
-    ports = 4;
-  }
 
   // Sanity checks to avoid voids in output filterbank
   if (nbin % 8 != 0) {
@@ -226,7 +217,7 @@ int main(int argc,char *argv[])
   }
   
   // Read sigproc header
-  struct header hdr = read_sigproc_header(sphdrfname, udpfname, rawudp, ports);
+  struct header hdr = read_sigproc_header(sphdrfname, udpfname, ports);
 
   for (int i = 0; i < 4; i++) {
     sprintf(tmpfname, udpfname, i);
@@ -262,6 +253,8 @@ int main(int argc,char *argv[])
     if (hdr.nbit == 0)
       hdr.nbit = 8;
 
+    fprintf(stderr, "bytes_skip is currently disabled.\n");
+    /*
     if (rawudp) {
       if (ts_skip % 16) {
         printf("Rounding ts_skip down to a the nearest multiple of 16, ");
@@ -272,6 +265,7 @@ int main(int argc,char *argv[])
       bytes_skip = (long int) (ts_skip / 16) * UDPPACKETLENGTH;
 
     } else bytes_skip = (long int) (ts_skip * (float) hdr.nsub);
+    */
 
     // Account for the difference in time in the new header if we skip bytes    // tstart = MJD, tsamp = seconds, 1 byte = 8 bits = 1 sample per file by default
     hdr.tstart += (double) ts_skip * hdr.tsamp / 86400.0;
@@ -280,7 +274,6 @@ int main(int argc,char *argv[])
   // Read the number of subbands
   nsub=hdr.nsub;
   double timeOffset = hdr.tsamp / nsub;
-  bitmul = (int) 8 / hdr.nbit;
 
   // Adjust header for filterbank format
   hdr.tsamp*=nchan*ndec;
@@ -450,10 +443,8 @@ int main(int argc,char *argv[])
     startclock=clock();
 
 
-    if (rawudp) {
-      nread_tmp = reshapeRawUdp(reader);
 
-    } else nread_tmp=fread(udpbuf[i],sizeof(char),nsamp*nsub,rawfile[i])/nsub;
+    nread_tmp = reshapeRawUdp(reader);
 
     if (nread > nread_tmp) {
       nread = nread_tmp;
@@ -565,15 +556,13 @@ int main(int argc,char *argv[])
   for (i=0;i<ndm;i++)
     fclose(outfile[i]);
 
-  // Close files
-  for (i=0;i<4;i++)
-    fclose(rawfile[i]);
+  // Reader cleanup
+  lofar_udp_reader_cleanup(reader);
 
   // Free
   free(header);
   for (i=0;i<4;i++) {
-    cudaFree(dudpbuf);
-    free(hdr.rawfname[i]);
+    cudaFree(dudpbuf);  
   }
   free(fbuf);
   free(dm);
@@ -750,7 +739,7 @@ struct header read_header(FILE *inputfile) /* includefile */
       strcpy(hdr.source_name,string);
       expecting_source_name=0;
     } else {
-      sprintf(message,"read_header - unknown parameter: %s\n",string);
+      sprintf(message,"read_header (%d) - unknown parameter: %s\n", dummyread, string);
       fprintf(stderr,"ERROR: %s\n",message);
       exit(1);
     } 
@@ -781,10 +770,9 @@ struct header read_header(FILE *inputfile) /* includefile */
 
 
 
-struct header read_sigproc_header(char *fname, char *dataname, int rawudp, int ports)
+struct header read_sigproc_header(char *fname, char *dataname, int ports)
 {
 
-  char ftest[2048];
   FILE *tmpf;
 
   tmpf = fopen(fname, "r");
@@ -1198,9 +1186,6 @@ int reshapeRawUdp(lofar_udp_reader *reader) {
 
   if (lofar_udp_reader_step(reader) > 0) return 0;
   int nread = reader->meta->packetsPerIteration;
-
-  for (int i = 0; i < 4; i++) printf("%d, ", reader->meta->portLastDroppedPackets[i]);
-  printf("\n");
 
  // MODE 11
 
