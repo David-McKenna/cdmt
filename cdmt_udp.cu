@@ -272,7 +272,6 @@ int main(int argc,char *argv[])
 
   // Read the number of subbands
   nsub=hdr.nsub;
-  double timeOffset = hdr.tsamp / nsub;
 
   // Adjust header for filterbank format
   hdr.tsamp*=nchan*ndec;
@@ -545,7 +544,7 @@ int main(int argc,char *argv[])
       // Write buffer
     }
     printf("Processed %d DMs in %.2f s\n",ndm,(float) (clock()-startclock)/CLOCKS_PER_SEC);
-    timeInSeconds += (double) nread * timeOffset;
+    timeInSeconds += (double) nread * hdr.tsamp;
     printf("Current data processed: %02ld:%02ld:%05.2lf (%1.2lfs)\n\n", (long int) (timeInSeconds / 3600.0), (long int) ((fmod(timeInSeconds, 3600.0)) / 60.0), fmod(timeInSeconds, 60.0), timeInSeconds);
     // Exit when we pass the read length limit
     if (total_ts_read > ts_read)
