@@ -12,13 +12,12 @@
 #include <getopt.h>
 #include <limits.h>
 
-#include "/home/suddenly/git/udpManager/lofar_udp_reader.h"
+#include "udpPacketManager/lofar_udp_reader.h"
+#include "udpPacketManager/lofar_udp_misc.h"
 
 #define HEADERSIZE 4096
 #define DMCONSTANT 2.41e-10
 
-#define UDPPACKETLENGTH 7824
-#define UDPHDRLEN 16 
 
 long lastPacket[4] = {0, 0, 0, 0};
 // Struct for header information
@@ -314,6 +313,7 @@ int main(int argc,char *argv[])
 
   const long packetGulp = nsamp / 16;
   reader = lofar_udp_meta_file_reader_setup(inputFiles, ports, 1, 11, 1, packetGulp, (long) -1, LONG_MAX, compressedInput);
+  hdr.tstart = lofar_get_packet_time(reader->meta->inputData[0]);
   if (verbose) printf("lofar_udp_reader Generated successfully.\n");
 
   // Set device
