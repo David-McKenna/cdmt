@@ -272,6 +272,7 @@ int main(int argc,char *argv[])
 
   // Read the number of subbands
   nsub=hdr.nsub;
+  double timeOffset = hdr.tsamp / nsub;
 
   // Adjust header for filterbank format
   hdr.tsamp*=nchan*ndec;
@@ -975,6 +976,7 @@ void send_string(const char *string,FILE *file)
   int len;
 
   len=strlen(string);
+  if (len > 63) len = 64;
   fwrite(&len,sizeof(int),1,file);
   fwrite(string,sizeof(char),len,file);
 
