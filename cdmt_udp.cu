@@ -313,7 +313,7 @@ int main(int argc,char *argv[])
 
   const long packetGulp = nsamp / 16;
   reader = lofar_udp_meta_file_reader_setup(inputFiles, ports, 1, 11, 1, packetGulp, (long) -1, LONG_MAX, compressedInput);
-  hdr.tstart = lofar_get_packet_time(reader->meta->inputData[0]);
+  hdr.tstart = lofar_get_packet_time_mjd(reader->meta->inputData[0]);
   if (verbose) printf("lofar_udp_reader Generated successfully.\n");
 
   // Set device
@@ -973,12 +973,15 @@ __global__ void transpose_unpadd_and_detect(cufftComplex *cp1,cufftComplex *cp2,
 
 void send_string(const char *string,FILE *file)
 {
-  int len;
+  int len, lenoff = 0;
 
   len=strlen(string);
-  if (len > 63) len = 64;
+  if (len > 63) {
+    lenoff = len - 64;
+    len = 64;
+  }
   fwrite(&len,sizeof(int),1,file);
-  fwrite(string,sizeof(char),len,file);
+  fwrite(&(string[lenoff]),sizeof(char),len,file);
 
   return;
 }
