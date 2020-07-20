@@ -21,8 +21,8 @@
 
 // Struct for header information
 struct header {
-  int nchan,nbit=0,nsub;
-  double tstart,tsamp,fch1,foff,fcen,bwchan,tel;
+  int nchan,nbit=0,nsub,tel;
+  double tstart,tsamp,fch1,foff,fcen,bwchan;
   double src_raj,src_dej;
   char source_name[80];
   char rawfname[4][1024];
@@ -36,6 +36,8 @@ __global__ void transpose_unpadd_and_detect(cufftComplex *cp1,cufftComplex *cp2,
 static __device__ __host__ inline cufftComplex ComplexScale(cufftComplex a,float s);
 static __device__ __host__ inline cufftComplex ComplexMul(cufftComplex a,cufftComplex b);
 static __global__ void PointwiseComplexMultiply(cufftComplex *a,cufftComplex *b,cufftComplex *c,int nx,int ny,int l,float scale);
+__global__ void repadd(int nsamp,int nbin,int nfft,int nsub,int noverlap,int replayFFT,int replayBin, cufftComplex *cp1,cufftComplex *cp2);
+__global__ void initialize_cufftComplex(int nbin,int nfft,int nsub, cufftComplex *cp1,cufftComplex *cp2);
 __global__ void unpack_and_padd(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2);
 __global__ void swap_spectrum_halves(cufftComplex *cp1,cufftComplex *cp2,int nx,int ny);
 __global__ void compute_chirp(double fcen,double bw,float *dm,int nchan,int nbin,int nsub,int ndm,cufftComplex *c);
@@ -76,7 +78,7 @@ void usage()
 
 int main(int argc,char *argv[])
 {
-  int i,nsamp,nload,nfft,mbin,nvalid,nchan=8,nbin=65536,noverlap=2048,nsub=20,ndm,ndec=1;
+  int i,nsamp,nfft,mbin,nvalid,nchan=8,nbin=65536,noverlap=2048,nsub=20,ndm,ndec=1;
   int idm,iblock,nread_tmp,nread,mchan,msamp,mblock,msum=1024;
   char *header,*udpbuf[4],*dudpbuf[4];
   FILE *file;
@@ -95,7 +97,7 @@ int main(int argc,char *argv[])
   int bytes_read;
   long int ts_read=LONG_MAX,ts_skip=0;
   long int total_ts_read=0;
-  int part=0,device=0,verbose=0,nforward=128,redig=1,ports=4,tel=11;
+  int part=0,device=0,verbose=0,nforward=128,redig=1,ports=4,tel=0;
   int arg=0;
   FILE **outfile;
 
@@ -200,7 +202,9 @@ int main(int argc,char *argv[])
   // Read sigproc header
   hdr = read_sigproc_header(sphdrfname, udpfname, ports);
 
-  int overlapCheck = (int) ((pow(2.41,4)) * abs(pow(hdr.fch1,-2) - pow(hdr.fch1 + hdr.nsub * hdr.foff, -2)) * (dm_start + dm_step * ndm) / nchan / pow(hdr.tsamp, 2));
+  float stg1 = abs(pow(hdr.fch1,-2) - pow(hdr.fch1 + hdr.nsub * hdr.foff, -2));
+  const float stg2 = 2.41e-4;
+  int overlapCheck = (int) (stg2 * stg1 * (dm_start + dm_step * ndm) / nchan / pow(hdr.tsamp, 2));
   if (overlapCheck > noverlap) {
     fprintf(stderr, "WARNING: The size of your FFT overlap is too short for the given maximum DM. Given overlap: %d, Suggested minimum overlap: %d.\n", noverlap, overlapCheck);
   }
@@ -236,15 +240,18 @@ int main(int argc,char *argv[])
   // Data size
   nvalid=nbin-2*noverlap;
   nsamp=nforward*nvalid;
-  nload=(nbin-noverlap)*nvalid;
-  nfft=(int) ceil(nsamp/(float) nvalid);
+  nfft=nforward;
   mbin=nbin/nchan; // nbin must be evenly divisible by 8
   mchan=nsub*nchan;
   msamp=nsamp/nchan; // nforward * nvalid must be divisble by 8
   mblock=msamp/msum; // nforward * nvalid / 8 must be disible by 1024
 
 
-  const long packetGulp = nload / 16;
+  int replayFFT = nsamp / nbin;
+  int replayBin = nsamp % nbin;
+
+  printf("%d, %d\n",replayFFT, replayBin);
+  long int packetGulp = nsamp / 16;
   reader = lofar_udp_meta_file_reader_setup(inputFiles, ports, 1, 11, 1, packetGulp, (long) -1, LONG_MAX, compressedInput);
   if (reader == NULL) {
     fprintf(stderr, "Failed to generate LOFAR UDP Reader, exiting.\n");
@@ -311,7 +318,7 @@ int main(int argc,char *argv[])
   if (redig) {
     cbuf=(unsigned char *) malloc(sizeof(unsigned char)*msamp*mchan/ndec);
     checkCudaErrors(cudaMalloc((void **) &dcbuf, (size_t) sizeof(unsigned char)*msamp*mchan/ndec));
-  }
+  } 
   else {
     cbuff = (float *) malloc(sizeof(float)*msamp*mchan/ndec);
     if (ndec > 1) {
@@ -335,6 +342,13 @@ int main(int argc,char *argv[])
   blocksize.x=32; blocksize.y=32; blocksize.z=1;
   gridsize.x=nsub/blocksize.x+1; gridsize.y=nchan/blocksize.y+1; gridsize.z=ndm/blocksize.z+1;
   compute_chirp<<<gridsize,blocksize>>>(hdr.fcen,nsub*hdr.bwchan,ddm,nchan,nbin,nsub,ndm,dc);
+
+  // Initialise cufft arrays
+  blocksize.x=32; blocksize.y=32; blocksize.z=1;
+  gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft/blocksize.y+1; gridsize.z=nsub/blocksize.z+1;
+  initialize_cufftComplex<<<gridsize,blocksize>>>(nbin,nfft,nsub,cp1p,cp2p);
+  cudaDeviceSynchronize();
+
   if (verbose) printf("Chirp calculated.\n");
   // Write temporary filterbank header
   file=fopen("/tmp/header.fil","w");
@@ -374,30 +388,26 @@ int main(int argc,char *argv[])
 
   // Loop over input file contents
   double timeInSeconds = 0.0;
-
+  nread = INT_MAX;
+  // Skip the first noverlap samples as they are 0'd
+  int writeOffset = noverlap * hdr.nchan;
   for (iblock=0;;iblock++) {
     // Read block
-    nread = INT_MAX;
     startclock=clock();
-
-
 
     nread_tmp = reshapeRawUdp(reader);
 
     if (nread > nread_tmp) {
       nread = nread_tmp;
-
-      if (i != 0 && nread != nsamp) {
-        printf("File %d returned less data than expected.\n", i);
-      }
     }
+
 
     if (nread==0) {
       printf("No data read from last file; assuming EOF, finishng up.\n");
       break;
+    } else if (iblock != 0 && nread < nread_tmp) {
+      printf("Received less data than expected; we may have parsed out of order data or we are nearing the EOF.\n");
     }
-
-    if (nread < nsamp) printf("Warning: ingestested less data than requested. Nearing EOF.\n");
 
     // Count up the total bytes read
     total_ts_read += nread;
@@ -410,12 +420,10 @@ int main(int argc,char *argv[])
       checkCudaErrors(cudaMemcpy(dudpbuf[i],udpbuf[i],sizeof(char)*nread*nsub,cudaMemcpyHostToDevice));
     }
 
-    // Copy end of last buffer to the start of the new buffer
-    checkCudaErrors(cudaMemcpy(cp1p,&(cp1p[nread*nsub]),sizeof(cufftComplex)*noverlap*nsub,cudaMemcpyDeviceToDevice));
-    checkCudaErrors(cudaMemcpy(cp2p,&(cp2p[nread*nsub]),sizeof(cufftComplex)*noverlap*nsub,cudaMemcpyDeviceToDevice));
     // Unpack data and padd data
     blocksize.x=32; blocksize.y=32; blocksize.z=1;
     gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft/blocksize.y+1; gridsize.z=nsub/blocksize.z+1;
+    repadd<<<gridsize,blocksize>>>(nread,nbin,nfft,nsub,noverlap,replayFFT,replayBin,cp1p,cp2p);
     unpack_and_padd<<<gridsize,blocksize>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
 
     // Perform FFTs
@@ -472,7 +480,7 @@ int main(int argc,char *argv[])
         // Copy buffer to host
         checkCudaErrors(cudaMemcpy(cbuf,dcbuf,sizeof(unsigned char)*msamp*mchan/ndec,cudaMemcpyDeviceToHost));
         // Write buffer
-        fwrite(cbuf,sizeof(char),nread*nsub/ndec,outfile[idm]);
+        fwrite(&(cbuf[writeOffset]),sizeof(char),nread*nsub/ndec,outfile[idm]);
 
       } else {
         if (ndec==1) checkCudaErrors(cudaMemcpy(cbuff, dfbuf,sizeof(float)*msamp*mchan,cudaMemcpyDeviceToHost));
@@ -480,12 +488,17 @@ int main(int argc,char *argv[])
           blocksize.x=32; blocksize.y=32; blocksize.z=1;
           gridsize.x=mchan/blocksize.x+1; gridsize.y=mblock/blocksize.y+1; gridsize.z=1;
           decimate<<<gridsize,blocksize>>>(dfbuf,ndec,mchan,mblock,msum,dcbuff);
+
           checkCudaErrors(cudaMemcpy(cbuff,dcbuff,sizeof(float)*msamp*mchan/ndec,cudaMemcpyDeviceToHost));
         }
         // Write buffer
-        fwrite(cbuff,sizeof(float),nread*nsub/ndec, outfile[idm]);
+        fwrite(&(cbuff[writeOffset]),sizeof(float),nread*nsub/ndec, outfile[idm]);
       }
 
+    }
+    // Reset the write offset after the first iteration
+    if (iblock == 0) {
+      writeOffset = 0;
     }
     printf("Processed %d DMs in %.2f s\n",ndm,(float) (clock()-startclock)/CLOCKS_PER_SEC);
     timeInSeconds += (double) nread * timeOffset;
@@ -641,7 +654,7 @@ struct header read_header(FILE *inputfile) /* includefile */
       totalbytes+=sizeof(hdr.nsub);
     } else if (strings_equal(string, (char *) "telescope_id")) {
       dummyread = fread(&(hdr.tel),sizeof(hdr.tel),1,inputfile);
-      totalbytes+=sizeof(int);
+      totalbytes+=sizeof(hdr.tel);
     } else if (strings_equal(string, (char *) "machine_id")) {
       fseek(inputfile, sizeof(int), SEEK_CUR);
       totalbytes+=sizeof(int);
@@ -823,10 +836,67 @@ __global__ void compute_chirp(double fcen,double bw,float *dm,int nchan,int nbin
   return;
 }
 
+
+__global__ void initialize_cufftComplex(int nbin,int nfft,int nsub, cufftComplex *cp1,cufftComplex *cp2)
+{
+  int64_t ibin,ifft,isub,idx1;
+
+  // Indices of input data
+  ibin=blockIdx.x*blockDim.x+threadIdx.x;
+  ifft=blockIdx.y*blockDim.y+threadIdx.y;
+  isub=blockIdx.z*blockDim.z+threadIdx.z;
+
+  // Only compute valid threads
+  if (ibin<nbin && ifft<nfft && isub<nsub) {
+    idx1=ibin+nbin*isub+nsub*nbin*ifft;
+    cp1[idx1].x=(float) 0.0;
+    cp1[idx1].y=(float) 0.0;
+    cp2[idx1].x=(float) 0.0;
+    cp2[idx1].y=(float) 0.0;
+  }
+
+  return;
+}
+
+__global__ void repadd(int nsamp,int nbin,int nfft,int nsub,int noverlap,int replayFFT,int replayBin, cufftComplex *cp1,cufftComplex *cp2) {
+  int64_t ibin,ifft,isamp,isub,idx1,idx2;
+
+  // Indices of input data
+  ibin=blockIdx.x*blockDim.x+threadIdx.x;
+  ifft=blockIdx.y*blockDim.y+threadIdx.y;
+  isub=blockIdx.z*blockDim.z+threadIdx.z;
+
+  // Only compute valid threads
+  if (ibin<nbin && ifft<nfft && isub<nsub) {
+    isamp=ibin+(nbin-2*noverlap)*ifft-noverlap;
+
+    if (isamp < 2 * noverlap) {
+      idx1=ibin+nbin*isub+nsub*nbin*ifft;
+
+      if (ibin + replayBin > nbin) {
+        ifft += replayBin + 1;
+        ibin = (ibin + replayBin) % nbin;
+      } else {
+        ifft += replayBin;
+        ibin += replayBin;
+      }
+
+      idx2=ibin+nbin*isub+nsub*nbin*ifft;
+
+      cp1[idx1].x=cp1[idx2].x;
+      cp1[idx1].y=cp1[idx2].y;
+      cp2[idx1].x=cp2[idx2].x;
+      cp2[idx1].y=cp2[idx2].y;
+    }
+  }
+  return;
+}
+
 // Unpack the input buffer and generate complex timeseries. The output
 // timeseries are padded with noverlap samples on either side for the
 // convolution.
-__global__ void unpack_and_padd(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2)
+// unpack_and_padd<<<g,b>>>           dudpbuf[0]  dudpbuf[1]  dudpbuf[2]  dudpbuf[3] nread   nbin     nfft     nsub     noverlap                cp1p              cp2p
+__global__ void unpack_and_padd(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap, cufftComplex *cp1,cufftComplex *cp2)
 {
   int64_t ibin,ifft,isamp,isub,idx1,idx2;
 
@@ -837,10 +907,12 @@ __global__ void unpack_and_padd(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,
 
   // Only compute valid threads
   if (ibin<nbin && ifft<nfft && isub<nsub) {
-    idx1=ibin+nbin*isub+nsub*nbin*ifft;
+    //idx1=[nfft, nsub, nbin] arr
     isamp=ibin+(nbin-2*noverlap)*ifft-noverlap;
-    idx2=isub+nsub*abs(isamp);
-    if (isamp>=0) {
+    if (isamp>=noverlap) {
+      idx1=ibin+nbin*isub+nsub*nbin*ifft;
+      idx2=isub+nsub*(isamp-noverlap);
+
       cp1[idx1].x=(float) dbuf0[idx2];
       cp1[idx1].y=(float) dbuf1[idx2];
       cp2[idx1].x=(float) dbuf2[idx2];
