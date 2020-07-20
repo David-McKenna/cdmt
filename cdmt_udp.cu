@@ -76,7 +76,7 @@ void usage()
 
 int main(int argc,char *argv[])
 {
-  int i,nsamp,nfft,mbin,nvalid,nchan=8,nbin=65536,noverlap=2048,nsub=20,ndm,ndec=1;
+  int i,nsamp,nload,nfft,mbin,nvalid,nchan=8,nbin=65536,noverlap=2048,nsub=20,ndm,ndec=1;
   int idm,iblock,nread_tmp,nread,mchan,msamp,mblock,msum=1024;
   char *header,*udpbuf[4],*dudpbuf[4];
   FILE *file;
@@ -236,6 +236,7 @@ int main(int argc,char *argv[])
   // Data size
   nvalid=nbin-2*noverlap;
   nsamp=nforward*nvalid;
+  nload=(nbin-noverlap)*nvalid;
   nfft=(int) ceil(nsamp/(float) nvalid);
   mbin=nbin/nchan; // nbin must be evenly divisible by 8
   mchan=nsub*nchan;
@@ -243,7 +244,7 @@ int main(int argc,char *argv[])
   mblock=msamp/msum; // nforward * nvalid / 8 must be disible by 1024
 
 
-  const long packetGulp = nsamp / 16;
+  const long packetGulp = nload / 16;
   reader = lofar_udp_meta_file_reader_setup(inputFiles, ports, 1, 11, 1, packetGulp, (long) -1, LONG_MAX, compressedInput);
   if (reader == NULL) {
     fprintf(stderr, "Failed to generate LOFAR UDP Reader, exiting.\n");
@@ -409,6 +410,9 @@ int main(int argc,char *argv[])
       checkCudaErrors(cudaMemcpy(dudpbuf[i],udpbuf[i],sizeof(char)*nread*nsub,cudaMemcpyHostToDevice));
     }
 
+    // Copy end of last buffer to the start of the new buffer
+    checkCudaErrors(cudaMemcpy(cp1p,&(cp1p[nread*nsub]),sizeof(cufftComplex)*noverlap*nsub,cudaMemcpyDeviceToDevice));
+    checkCudaErrors(cudaMemcpy(cp2p,&(cp2p[nread*nsub]),sizeof(cufftComplex)*noverlap*nsub,cudaMemcpyDeviceToDevice));
     // Unpack data and padd data
     blocksize.x=32; blocksize.y=32; blocksize.z=1;
     gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft/blocksize.y+1; gridsize.z=nsub/blocksize.z+1;
@@ -836,14 +840,12 @@ __global__ void unpack_and_padd(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,
     idx1=ibin+nbin*isub+nsub*nbin*ifft;
     isamp=ibin+(nbin-2*noverlap)*ifft-noverlap;
     idx2=isub+nsub*abs(isamp);
-    if (isamp>=nsamp) {
-      idx2 -= 2 * (isamp - nsamp + 1) * nsub;
-    } 
-
-    cp1[idx1].x=(float) dbuf0[idx2];
-    cp1[idx1].y=(float) dbuf1[idx2];
-    cp2[idx1].x=(float) dbuf2[idx2];
-    cp2[idx1].y=(float) dbuf3[idx2];
+    if (isamp>=0) {
+      cp1[idx1].x=(float) dbuf0[idx2];
+      cp1[idx1].y=(float) dbuf1[idx2];
+      cp2[idx1].x=(float) dbuf2[idx2];
+      cp2[idx1].y=(float) dbuf3[idx2];
+    }
   }
 
   return;
@@ -990,7 +992,7 @@ void write_filterbank_header(struct header h,FILE *file)
   send_string("source_name",file);
   send_string(h.source_name,file);
   send_int("machine_id",11,file);
-  send_int("telescope_id",11,file);
+  send_int("telescope_id",h.tel,file);
   send_double("src_raj",h.src_raj,file);
   send_double("src_dej",h.src_dej,file);
   send_int("data_type",1,file);
