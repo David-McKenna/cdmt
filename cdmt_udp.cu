@@ -808,6 +808,9 @@ __global__ void compute_chirp(double fcen,double bw,float *dm,int nchan,int nbin
 // Unpack the input buffer and generate complex timeseries. The output
 // timeseries are padded with noverlap samples on either side for the
 // convolution.
+// Unpack the input buffer and generate complex timeseries. The output
+// timeseries are padded with noverlap samples on either side for the
+// convolution.
 __global__ void unpack_and_padd(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2)
 {
   int64_t ibin,ifft,isamp,isub,idx1,idx2;
@@ -821,15 +824,18 @@ __global__ void unpack_and_padd(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,
   if (ibin<nbin && ifft<nfft && isub<nsub) {
     idx1=ibin+nbin*isub+nsub*nbin*ifft;
     isamp=ibin+(nbin-2*noverlap)*ifft-noverlap;
-    idx2=isub+nsub*abs(isamp);
-    if (isamp>=nsamp) {
-      idx2 -= 2 * (isamp - nsamp + 1) * nsub;
-    } 
-
-    cp1[idx1].x=(float) dbuf0[idx2];
-    cp1[idx1].y=(float) dbuf1[idx2];
-    cp2[idx1].x=(float) dbuf2[idx2];
-    cp2[idx1].y=(float) dbuf3[idx2];
+    idx2=isub+nsub*isamp;
+    if (isamp<0 || isamp>=nsamp) {
+      cp1[idx1].x=0.0;
+      cp1[idx1].y=0.0;
+      cp2[idx1].x=0.0;
+      cp2[idx1].y=0.0;
+    } else {
+      cp1[idx1].x=(float) dbuf0[idx2];
+      cp1[idx1].y=(float) dbuf1[idx2];
+      cp2[idx1].x=(float) dbuf2[idx2];
+      cp2[idx1].y=(float) dbuf3[idx2];
+    }
   }
 
   return;
