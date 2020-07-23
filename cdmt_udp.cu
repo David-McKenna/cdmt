@@ -21,7 +21,7 @@
 
 // Struct for header information
 struct header {
-  int nchan,nbit=0,nsub,tel;
+  int nchan,nbit=0,nsub,tel=11;
   double tstart,tsamp,fch1,foff,fcen,bwchan;
   double src_raj,src_dej;
   char source_name[80];
@@ -240,7 +240,7 @@ int main(int argc,char *argv[])
   // Data size
   nvalid=nbin-2*noverlap;
   nsamp=nforward*nvalid;
-  nfft=nforward;
+  nfft=(int) ceil(nsamp/(float) nvalid);
   mbin=nbin/nchan; // nbin must be evenly divisible by 8
   mchan=nsub*nchan;
   msamp=nsamp/nchan; // nforward * nvalid must be divisble by 8
@@ -318,20 +318,17 @@ int main(int argc,char *argv[])
   if (redig) {
     cbuf=(unsigned char *) malloc(sizeof(unsigned char)*msamp*mchan/ndec);
     checkCudaErrors(cudaMalloc((void **) &dcbuf, (size_t) sizeof(unsigned char)*msamp*mchan/ndec));
-  } 
+  }
   else {
     cbuff = (float *) malloc(sizeof(float)*msamp*mchan/ndec);
-    if (ndec > 1) {
-      checkCudaErrors(cudaMalloc((void **) &dcbuff, (size_t) sizeof(float)*msamp*mchan/ndec));
-    }
+    if (ndec > 1) checkCudaErrors(cudaMalloc((void **) &dcbuff, (size_t) sizeof(float)*msamp*mchan/ndec));
   }
 
 
   // Allocate DMs and copy to device
   dm=(float *) malloc(sizeof(float)*ndm);
-  for (idm=0;idm<ndm;idm++) {
+  for (idm=0;idm<ndm;idm++)
     dm[idm]=dm_start+(float) idm*dm_step;
-  }
   checkCudaErrors(cudaMalloc((void **) &ddm, (size_t) sizeof(float)*ndm));
   checkCudaErrors(cudaMemcpy(ddm,dm,sizeof(float)*ndm,cudaMemcpyHostToDevice));
 
@@ -401,7 +398,6 @@ int main(int argc,char *argv[])
       nread = nread_tmp;
     }
 
-
     if (nread==0) {
       printf("No data read from last file; assuming EOF, finishng up.\n");
       break;
@@ -416,9 +412,8 @@ int main(int argc,char *argv[])
 
     // Copy buffers to device
     startclock=clock();
-    for (i=0;i<4;i++) {
+    for (i=0;i<4;i++)
       checkCudaErrors(cudaMemcpy(dudpbuf[i],udpbuf[i],sizeof(char)*nread*nsub,cudaMemcpyHostToDevice));
-    }
 
     // Unpack data and padd data
     blocksize.x=32; blocksize.y=32; blocksize.z=1;
@@ -480,7 +475,7 @@ int main(int argc,char *argv[])
         // Copy buffer to host
         checkCudaErrors(cudaMemcpy(cbuf,dcbuf,sizeof(unsigned char)*msamp*mchan/ndec,cudaMemcpyDeviceToHost));
         // Write buffer
-        fwrite(&(cbuf[writeOffset]),sizeof(char),nread*nsub/ndec,outfile[idm]);
+        fwrite(&(cbuf[writeOffset]),sizeof(char),(nread - writeOffset)*nsub/ndec,outfile[idm]);
 
       } else {
         if (ndec==1) checkCudaErrors(cudaMemcpy(cbuff, dfbuf,sizeof(float)*msamp*mchan,cudaMemcpyDeviceToHost));
@@ -488,11 +483,10 @@ int main(int argc,char *argv[])
           blocksize.x=32; blocksize.y=32; blocksize.z=1;
           gridsize.x=mchan/blocksize.x+1; gridsize.y=mblock/blocksize.y+1; gridsize.z=1;
           decimate<<<gridsize,blocksize>>>(dfbuf,ndec,mchan,mblock,msum,dcbuff);
-
           checkCudaErrors(cudaMemcpy(cbuff,dcbuff,sizeof(float)*msamp*mchan/ndec,cudaMemcpyDeviceToHost));
         }
         // Write buffer
-        fwrite(&(cbuff[writeOffset]),sizeof(float),nread*nsub/ndec, outfile[idm]);
+        fwrite(&(cbuff[writeOffset]),sizeof(float),(nread - writeOffset)*nsub/ndec, outfile[idm]);
       }
 
     }
@@ -504,16 +498,13 @@ int main(int argc,char *argv[])
     timeInSeconds += (double) nread * timeOffset;
     printf("Current data processed: %02ld:%02ld:%05.2lf (%1.2lfs)\n\n", (long int) (timeInSeconds / 3600.0), (long int) ((fmod(timeInSeconds, 3600.0)) / 60.0), fmod(timeInSeconds, 60.0), timeInSeconds);
     // Exit when we pass the read length limit
-    if (total_ts_read > ts_read){
+    if (total_ts_read > ts_read)
       break;
-    }
-
   }
 
   // Close files
-  for (i=0;i<ndm;i++) {
+  for (i=0;i<ndm;i++)
     fclose(outfile[i]);
-  }
 
   // Reader cleanup
   lofar_udp_reader_cleanup(reader);
@@ -556,10 +547,17 @@ int main(int argc,char *argv[])
 
 
 
-
 // Rip out sigproc's header reader. Don't have the time to spend several hours reimplementing it; all credit to Lorimer et al.
 //BEGIN SIGPROC READ_HEADER.C
 //
+int strings_equal (char *string1, char *string2) /* includefile */
+{
+  if (!strcmp(string1,string2)) {
+    return 1;
+  } else {
+    return 0;
+  }
+}
 /* read a string from the input which looks like nchars-char[1-nchars] */
 void get_string(FILE *inputfile, int *nbytes, char string[])
 {
@@ -572,16 +570,6 @@ void get_string(FILE *inputfile, int *nbytes, char string[])
   if (! fread(string, nchar, 1, inputfile)) fprintf(stderr, "Failed to get stirng at %d\n", *nbytes);
   string[nchar]='\0';
   *nbytes+=nchar;
-}
-
-
-int strings_equal(char* string1, char* string2)
-{
-  if (!strcmp(string1,string2)) {
-    return 1;
-  } else {
-    return 0;
-  }
 }
 
 /* attempt to read in the general header info from a pulsar data file */
@@ -896,7 +884,7 @@ __global__ void repadd(int nsamp,int nbin,int nfft,int nsub,int noverlap,int rep
 // timeseries are padded with noverlap samples on either side for the
 // convolution.
 // unpack_and_padd<<<g,b>>>           dudpbuf[0]  dudpbuf[1]  dudpbuf[2]  dudpbuf[3] nread   nbin     nfft     nsub     noverlap                cp1p              cp2p
-__global__ void unpack_and_padd(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap, cufftComplex *cp1,cufftComplex *cp2)
+__global__ void unpack_and_padd(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2)
 {
   int64_t ibin,ifft,isamp,isub,idx1,idx2;
 
