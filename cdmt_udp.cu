@@ -408,6 +408,7 @@ int main(int argc,char *argv[])
 
   // Skip the first noverlap samples as they are 0'd
   int writeOffset = noverlap * 2;
+  printf("Init\n");
   #pragma omp parallel for ordered schedule(static, 1) private(writeOffset)
   for (iblock=0;;iblock++) {
     #pragma omp cancellation point parallel
@@ -427,7 +428,7 @@ int main(int argc,char *argv[])
       cudaEventSynchronize(events[0]);
       startclock=clock();
       nread_tmp = reshapeRawUdp(reader);
-
+      printf("%d read\n", iblock);
       if (nread > nread_tmp) {
         nread = nread_tmp;
       }
@@ -473,6 +474,7 @@ int main(int argc,char *argv[])
     gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft*nsub/blocksize.y+1; gridsize.z=1;
     swap_spectrum_halves<<<gridsize,blocksize,0,stream>>>(cp1p,cp2p,nbin,nfft*nsub);
 
+    printf("%d dm\n", iblock);
     // Loop over dms
     for (idm=0;idm<ndm;idm++) {
 
@@ -485,6 +487,7 @@ int main(int argc,char *argv[])
       // end of cp1p/cp2p needed
 
       if (idm == ndm - 1) {
+        printf("%d dm lock\n", iblock);
         checkCudaErrors(cudaEventRecord(events[2], stream));
         cudaStreamWaitEvent(streams[2], events[2], 0);
 
@@ -560,6 +563,7 @@ int main(int argc,char *argv[])
       }
     }
 
+    printf("%d dm comp\n");
     #pragma omp taskwait
 
     printf("Processed %d DMs in %.2f s\n",ndm,(float) (clock()-startclock)/CLOCKS_PER_SEC);
@@ -632,7 +636,9 @@ int main(int argc,char *argv[])
 
 void inline write_to_disk_float(float* outputArray, FILE* outputFile, int nsamples, cudaEvent_t waitEvent)
 {
+  printf("wait\n");
   cudaEventSynchronize(waitEvent);
+  printf("go\n");
   fwrite(outputArray,sizeof(float),nsamples, outputFile); 
 }
 
