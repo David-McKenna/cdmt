@@ -1,5 +1,5 @@
 # CUDA PATH
-CUDAPATH = /usr/lib/cuda/
+CUDAPATH = /usr/$(shell test -d /usr/lib/cuda && echo lib/cuda || echo local/cuda)
 
 # Compiling flags
 CFLAGS = -I./cuda-samples/Common -I/usr/include/hdf5/serial/ -I./udpPacketManager/
