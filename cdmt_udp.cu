@@ -48,7 +48,7 @@ __global__ void redigitize(float *z,int nchan,int nblock,int nsum,float *zavg,fl
 __global__ void decimate_and_redigitize(float *z,int ndec,int nchan,int nblock,int nsum,float *zavg,float *zstd,float zmin,float zmax,unsigned char *cz);
 __global__ void decimate(float *z,int ndec,int nchan,int nblock,int nsum,float *cz);
 void write_to_disk_float(float* outputArray, FILE* outputFile, int nsamples, cudaEvent_t waitEvent);
-void write_to_disk_char(char* outputArray, FILE* outputFile, int nsamples, cudaEvent_t waitEvent);
+void write_to_disk_char(unsigned char* outputArray, FILE* outputFile, int nsamples, cudaEvent_t waitEvent);
 void write_filterbank_header(struct header h,FILE *file);
 int reshapeRawUdp(lofar_udp_reader *reader);
 long  __inline__ beamformed_packno(unsigned int timestamp, unsigned int sequence);
@@ -530,33 +530,31 @@ int main(int argc,char *argv[])
     decimate_and_redigitize<<<gridsize,blocksize,0,stream>>>(dfbuf,ndec,mchan,mblock,msum,zavg,zstd,3.0,5.0,dcbuf);      
 
         // Copy buffer to host
-        checkCudaErrors(cudaMemcpyAsync(cbuf[streamIdx],dcbuf,sizeof(unsigned char)*msamp*mchan/ndec,cudaMemcpyDeviceToHost,stream));
+        checkCudaErrors(cudaMemcpyAsync(cbuf[streamIdx][idm],dcbuf,sizeof(unsigned char)*msamp*mchan/ndec,cudaMemcpyDeviceToHost,stream));
 
         cudaEventRecord(dmWriteEvents[streamIdx][idm]);
 
         #pragma omp task
         {
-          write_to_disk_char(&(cbuf[streamIdx][writeOffset*nsub/ndec]), outfile[idm], (nread-writeOffset)*nsub/ndec, dmWriteEvents[streamIdx][idm]);
+          write_to_disk_char(&(cbuf[streamIdx][idm][writeOffset*nsub/ndec]), outfile[idm], (nread-writeOffset)*nsub/ndec, dmWriteEvents[streamIdx][idm]);
         }
-        // Write buffer
-        fwrite(&(cbuf[streamIdx][writeOffset*nsub/ndec]),sizeof(char),(nread-writeOffset)*nsub/ndec,outfile[idm]);
 
       } else {
         if (ndec==1) {
-          checkCudaErrors(cudaMemcpyAsync(cbuff[streamIdx], dfbuf,sizeof(float)*msamp*mchan,cudaMemcpyDeviceToHost,stream));
+          checkCudaErrors(cudaMemcpyAsync(cbuff[streamIdx][idm], dfbuf,sizeof(float)*msamp*mchan,cudaMemcpyDeviceToHost,stream));
           
         } else {
           blocksize.x=32; blocksize.y=32; blocksize.z=1;
           gridsize.x=mchan/blocksize.x+1; gridsize.y=mblock/blocksize.y+1; gridsize.z=1;
           decimate<<<gridsize,blocksize,0,stream>>>(dfbuf,ndec,mchan,mblock,msum,dcbuff);
-          checkCudaErrors(cudaMemcpyAsync(cbuff[streamIdx],dcbuff,sizeof(float)*msamp*mchan/ndec,cudaMemcpyDeviceToHost,stream));
+          checkCudaErrors(cudaMemcpyAsync(cbuff[streamIdx][idm],dcbuff,sizeof(float)*msamp*mchan/ndec,cudaMemcpyDeviceToHost,stream));
         }
 
         cudaEventRecord(dmWriteEvents[streamIdx][idm]);
 
         #pragma omp task
         {
-          write_to_disk_float(&(cbuff[streamIdx][writeOffset*nsub/ndec]), outfile[idm], (nread-writeOffset)*nsub/ndec, dmWriteEvents[streamIdx][idm]);
+          write_to_disk_float(&(cbuff[streamIdx][idm][writeOffset*nsub/ndec]), outfile[idm], (nread-writeOffset)*nsub/ndec, dmWriteEvents[streamIdx][idm]);
         }
       }
     }
@@ -631,7 +629,7 @@ void write_to_disk_float(float* outputArray, FILE* outputFile, int nsamples, cud
   fwrite(outputArray,sizeof(float),nsamples, outputFile); 
 }
 
-void write_to_disk_char(char* outputArray, FILE* outputFile, int nsamples, cudaEvent_t waitEvent)
+void write_to_disk_char(unsigned char* outputArray, FILE* outputFile, int nsamples, cudaEvent_t waitEvent)
 {
   cudaEventSynchronize(waitEvent);
   fwrite(outputArray,sizeof(char),nsamples, outputFile); 
