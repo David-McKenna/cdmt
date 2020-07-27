@@ -47,8 +47,8 @@ __global__ void compute_channel_statistics(int nchan,int nblock,int nsum,float *
 __global__ void redigitize(float *z,int nchan,int nblock,int nsum,float *zavg,float *zstd,float zmin,float zmax,unsigned char *cz);
 __global__ void decimate_and_redigitize(float *z,int ndec,int nchan,int nblock,int nsum,float *zavg,float *zstd,float zmin,float zmax,unsigned char *cz);
 __global__ void decimate(float *z,int ndec,int nchan,int nblock,int nsum,float *cz);
-void write_to_disk_float(float* outputArray, FILE* outputFile, int nsamples, cudaEvent_t waitEvent)
-void write_to_disk_char(char* outputArray, FILE* outputFile, int nsamples, cudaEvent_t waitEvent)
+void write_to_disk_float(float* outputArray, FILE* outputFile, int nsamples, cudaEvent_t waitEvent);
+void write_to_disk_char(char* outputArray, FILE* outputFile, int nsamples, cudaEvent_t waitEvent);
 void write_filterbank_header(struct header h,FILE *file);
 int reshapeRawUdp(lofar_udp_reader *reader);
 long  __inline__ beamformed_packno(unsigned int timestamp, unsigned int sequence);
