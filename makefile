@@ -25,7 +25,9 @@ cdmt_udp.o: cdmt_udp.cu
 	$(NVCC) $(CFLAGS) -o $@ -c $<
 
 git:
-	git submodule update --init --recursive
+	git submodule update --init --recursive --remote
+	cd udpPacketManager; make all
 clean:
 	rm -f *.o
 	rm -f *~
+	cd udpPacketManager; make clean
