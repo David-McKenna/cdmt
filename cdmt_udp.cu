@@ -335,12 +335,17 @@ int main(int argc,char *argv[])
   fbuf=(float *) malloc(sizeof(float)*nsamp*nsub);
   checkCudaErrors(cudaMalloc((void **) &dfbuf, (size_t) sizeof(float)*nsamp*nsub));
   
+
   if (redig) {
+    for(i = 0; i < 2; i++)
+      cbuf[i] = (unsigned char**) malloc(sizeof(unsigned char*)*ndm);
     for (i = 0; i < ndm; i++)
       for (j = 0; j < 2; j++)
         cbuf[j][i]=(unsigned char *) malloc(sizeof(unsigned char)*msamp*mchan/ndec);
     checkCudaErrors(cudaMalloc((void **) &dcbuf, (size_t) sizeof(unsigned char)*msamp*mchan/ndec));
   } else {
+    for(i = 0; i < 2; i++)
+      cbuff[i] = (float**) malloc(sizeof(float*)*ndm);
     for (i = 0; i < ndm; i++)
       for (j = 0; j < 2; j++)
         cbuff[j][i] = (float *) malloc(sizeof(float)*msamp*mchan/ndec);
