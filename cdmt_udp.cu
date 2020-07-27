@@ -503,6 +503,7 @@ int main(int argc,char *argv[])
       checkCudaErrors(cufftExecC2C(ftc2cb,(cufftComplex *) cp1,(cufftComplex *) cp1,CUFFT_INVERSE));
       checkCudaErrors(cufftExecC2C(ftc2cb,(cufftComplex *) cp2,(cufftComplex *) cp2,CUFFT_INVERSE));
       
+      cudaStreamWaitEvent(stream, dmWriteEvents[streamIdx][idm-1 > -1 ? idm-1 : 0], 0);
       // Detect data
       blocksize.x=32; blocksize.y=32; blocksize.z=1;
       gridsize.x=mbin/blocksize.x+1; gridsize.y=nchan/blocksize.y+1; gridsize.z=nfft/blocksize.z+1;
@@ -532,7 +533,7 @@ int main(int argc,char *argv[])
         // Copy buffer to host
         checkCudaErrors(cudaMemcpyAsync(cbuf[streamIdx][idm],dcbuf,sizeof(unsigned char)*msamp*mchan/ndec,cudaMemcpyDeviceToHost,stream));
 
-        cudaEventRecord(dmWriteEvents[streamIdx][idm]);
+        cudaEventRecord(dmWriteEvents[streamIdx][idm], stream);
 
         #pragma omp task
         {
@@ -550,7 +551,7 @@ int main(int argc,char *argv[])
           checkCudaErrors(cudaMemcpyAsync(cbuff[streamIdx][idm],dcbuff,sizeof(float)*msamp*mchan/ndec,cudaMemcpyDeviceToHost,stream));
         }
 
-        cudaEventRecord(dmWriteEvents[streamIdx][idm]);
+        cudaEventRecord(dmWriteEvents[streamIdx][idm], stream);
 
         #pragma omp task
         {
@@ -589,16 +590,18 @@ int main(int argc,char *argv[])
   free(outfile);
 
   if (redig) {
-    free(cbuf[0]);
-    free(cbuf[1]);
+    for (i = 0; i < ndm; i++)
+      for (j =0; j < 2; j++)
+        free(cbuf[j][i]);
     cudaFree(bs1);
     cudaFree(bs2);
     cudaFree(zavg);
     cudaFree(zstd);
     cudaFree(dcbuf);
   } else {
-    free(cbuff[0]);
-    free(cbuff[1]);
+    for (i = 0; i < ndm; i++)
+      for (j =0; j < 2; j++)
+        free(cbuff[j][i]);
     if (ndec > 1) cudaFree(dcbuff);
   }
 
@@ -619,17 +622,21 @@ int main(int argc,char *argv[])
   for(i = 0; i < 2; i++)
     cudaEventDestroy(events[i]);
 
+  for (i = 0; i < ndm; i++)
+    for (j =0; j < 2; j++)
+      cudaEventDestroy(dmWriteEvents[j][i]);
+
   return 0;
 }
 
 
-void write_to_disk_float(float* outputArray, FILE* outputFile, int nsamples, cudaEvent_t waitEvent)
+void inline write_to_disk_float(float* outputArray, FILE* outputFile, int nsamples, cudaEvent_t waitEvent)
 {
   cudaEventSynchronize(waitEvent);
   fwrite(outputArray,sizeof(float),nsamples, outputFile); 
 }
 
-void write_to_disk_char(unsigned char* outputArray, FILE* outputFile, int nsamples, cudaEvent_t waitEvent)
+void inline write_to_disk_char(unsigned char* outputArray, FILE* outputFile, int nsamples, cudaEvent_t waitEvent)
 {
   cudaEventSynchronize(waitEvent);
   fwrite(outputArray,sizeof(char),nsamples, outputFile); 
