@@ -434,7 +434,7 @@ int main(int argc,char *argv[])
       for (i=0;i<4;i++)
         checkCudaErrors(cudaMemcpyAsync(dudpbuf[i],udpbuf[i],sizeof(char)*nread*nsub,cudaMemcpyHostToDevice,stream));
 
-      cudaEventRecord(events[0], stream);
+      checkCudaErrors(cudaEventRecord(events[0], stream));
     }
     // Unpack data and padd data
     blocksize.x=32; blocksize.y=32; blocksize.z=1;
@@ -472,7 +472,7 @@ int main(int argc,char *argv[])
         blocksize.x=32; blocksize.y=32; blocksize.z=1;
         gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft/blocksize.y+1; gridsize.z=nsub/blocksize.z+1;
         padd_next_iteration<<<gridsize,blocksize,0,streams[2]>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
-        cudaEventRecord(events[1], streams[2]);
+        checkCudaErrors(cudaEventRecord(events[1], streams[2]));
         omp_unset_lock(&readingLock);
       }
       // Swap spectrum halves for small FFTs
@@ -513,10 +513,10 @@ int main(int argc,char *argv[])
         // Copy buffer to host
         checkCudaErrors(cudaMemcpyAsync(cbuf,dcbuf,sizeof(unsigned char)*msamp*mchan/ndec,cudaMemcpyDeviceToHost,stream));
         // Write buffer
-        fwrite(cbuf,sizeof(char),(nread-writeOffset)*nsub/ndec,outfile[idm]);
+        fwrite(&(cbuf[writeOffset*nsub/ndec]),sizeof(char),(nread-writeOffset)*nsub/ndec,outfile[idm]);
 
       } else {
-        if (ndec==1) checkCudaErrors(cudaMemcpy(cbuff, dfbuf,sizeof(float)*msamp*mchan,cudaMemcpyDeviceToHost));
+        if (ndec==1) checkCudaErrors(cudaMemcpyAsync(cbuff, dfbuf,sizeof(float)*msamp*mchan,cudaMemcpyDeviceToHost,stream));
         else {
           blocksize.x=32; blocksize.y=32; blocksize.z=1;
           gridsize.x=mchan/blocksize.x+1; gridsize.y=mblock/blocksize.y+1; gridsize.z=1;
@@ -524,7 +524,7 @@ int main(int argc,char *argv[])
           checkCudaErrors(cudaMemcpyAsync(cbuff,dcbuff,sizeof(float)*msamp*mchan/ndec,cudaMemcpyDeviceToHost,stream));
         }
 
-        fwrite(cbuff,sizeof(float),(nread-writeOffset)*nsub/ndec, outfile[idm]);
+        fwrite(&(cbuff[writeOffset*nsub/ndec]),sizeof(float),(nread-writeOffset)*nsub/ndec, outfile[idm]);
       }
     }
 
