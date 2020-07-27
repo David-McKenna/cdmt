@@ -83,8 +83,8 @@ int main(int argc,char *argv[])
   int idm,iblock,nread_tmp,nread,mchan,msamp,mblock,msum=1024;
   char *header,*udpbuf[4],*dudpbuf[4];
   FILE *file;
-  unsigned char *cbuf,*dcbuf;
-  float *cbuff, *dcbuff;
+  unsigned char **cbuf,*dcbuf;
+  float **cbuff, *dcbuff;
   float *fbuf,*dfbuf;
   float *bs1,*bs2,*zavg,*zstd;
   cufftComplex *cp1,*cp2,*dc,*cp1p,*cp2p;
@@ -277,9 +277,10 @@ int main(int argc,char *argv[])
     checkCudaErrors(cudaStreamCreate(&(streams[i])));
 
   // Create 2 events; one which blocks execution (preventing new data reads) and the other waiting for compute to finish.
-  cudaEvent_t events[2];
+  cudaEvent_t events[3];
   cudaEventCreateWithFlags(&(events[0]), cudaEventBlockingSync & cudaEventDisableTiming);
   cudaEventCreateWithFlags(&(events[1]), cudaEventDisableTiming);
+  cudaEventCreateWithFlags(&(events[2]), cudaEventDisableTiming);
 
   // DMcK: cuFFT docs say it's best practice to plan before allocating memory
   // cuda-memcheck fails initialisation before this block is run?
@@ -328,10 +329,12 @@ int main(int argc,char *argv[])
   checkCudaErrors(cudaMalloc((void **) &dfbuf, (size_t) sizeof(float)*nsamp*nsub));
   
   if (redig) {
-    cbuf=(unsigned char *) malloc(sizeof(unsigned char)*msamp*mchan/ndec);
+    cbuf[0]=(unsigned char *) malloc(sizeof(unsigned char)*msamp*mchan/ndec);
+    cbuf[1]=(unsigned char *) malloc(sizeof(unsigned char)*msamp*mchan/ndec);
     checkCudaErrors(cudaMalloc((void **) &dcbuf, (size_t) sizeof(unsigned char)*msamp*mchan/ndec));
   } else {
-    cbuff = (float *) malloc(sizeof(float)*msamp*mchan/ndec);
+    cbuff[0] = (float *) malloc(sizeof(float)*msamp*mchan/ndec);
+    cbuff[1] = (float *) malloc(sizeof(float)*msamp*mchan/ndec);
     if (ndec > 1) checkCudaErrors(cudaMalloc((void **) &dcbuff, (size_t) sizeof(float)*msamp*mchan/ndec));
   }
 
@@ -396,10 +399,14 @@ int main(int argc,char *argv[])
 
   // Skip the first noverlap samples as they are 0'd
   int writeOffset = noverlap * 2;
-  #pragma omp parallel for ordered schedule(static, 1)
+  #pragma omp parallel for ordered schedule(static, 1) private(writeOffset)
   for (iblock=0;;iblock++) {
     #pragma omp cancellation point parallel
 
+    if (iblock != 0)
+      writeOffset = 0;
+    else
+      writeOffset = noverlap * 2;
 
     // Ge tthe current stream from block iteration
     int streamIdx = iblock % 2;
@@ -469,6 +476,9 @@ int main(int argc,char *argv[])
       // end of cp1p/cp2p needed
 
       if (idm == ndm - 1) {
+        checkCudaErrors(cudaEventRecord(events[2], stream));
+        cudaStreamWaitEvent(streams[2], events[2], 0);
+
         blocksize.x=32; blocksize.y=32; blocksize.z=1;
         gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft/blocksize.y+1; gridsize.z=nsub/blocksize.z+1;
         padd_next_iteration<<<gridsize,blocksize,0,streams[2]>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
@@ -511,20 +521,20 @@ int main(int argc,char *argv[])
     decimate_and_redigitize<<<gridsize,blocksize,0,stream>>>(dfbuf,ndec,mchan,mblock,msum,zavg,zstd,3.0,5.0,dcbuf);      
 
         // Copy buffer to host
-        checkCudaErrors(cudaMemcpyAsync(cbuf,dcbuf,sizeof(unsigned char)*msamp*mchan/ndec,cudaMemcpyDeviceToHost,stream));
+        checkCudaErrors(cudaMemcpyAsync(cbuf[streamIdx],dcbuf,sizeof(unsigned char)*msamp*mchan/ndec,cudaMemcpyDeviceToHost,stream));
         // Write buffer
-        fwrite(&(cbuf[writeOffset*nsub/ndec]),sizeof(char),(nread-writeOffset)*nsub/ndec,outfile[idm]);
+        fwrite(&(cbuf[streamIdx][writeOffset*nsub/ndec]),sizeof(char),(nread-writeOffset)*nsub/ndec,outfile[idm]);
 
       } else {
-        if (ndec==1) checkCudaErrors(cudaMemcpyAsync(cbuff, dfbuf,sizeof(float)*msamp*mchan,cudaMemcpyDeviceToHost,stream));
+        if (ndec==1) checkCudaErrors(cudaMemcpyAsync(cbuff[streamIdx], dfbuf,sizeof(float)*msamp*mchan,cudaMemcpyDeviceToHost,stream));
         else {
           blocksize.x=32; blocksize.y=32; blocksize.z=1;
           gridsize.x=mchan/blocksize.x+1; gridsize.y=mblock/blocksize.y+1; gridsize.z=1;
           decimate<<<gridsize,blocksize,0,stream>>>(dfbuf,ndec,mchan,mblock,msum,dcbuff);
-          checkCudaErrors(cudaMemcpyAsync(cbuff,dcbuff,sizeof(float)*msamp*mchan/ndec,cudaMemcpyDeviceToHost,stream));
+          checkCudaErrors(cudaMemcpyAsync(cbuff[streamIdx],dcbuff,sizeof(float)*msamp*mchan/ndec,cudaMemcpyDeviceToHost,stream));
         }
 
-        fwrite(&(cbuff[writeOffset*nsub/ndec]),sizeof(float),(nread-writeOffset)*nsub/ndec, outfile[idm]);
+        fwrite(&(cbuff[streamIdx][writeOffset*nsub/ndec]),sizeof(float),(nread-writeOffset)*nsub/ndec, outfile[idm]);
       }
     }
 
@@ -536,9 +546,7 @@ int main(int argc,char *argv[])
     if (total_ts_read > ts_read) {
       #pragma omp cancel parallel for
     }
-    // Reset the write offset after the first iteration
-    if (iblock == 0)
-      writeOffset = 0;
+
   }
 
   omp_destroy_lock(&readingLock);
@@ -559,14 +567,16 @@ int main(int argc,char *argv[])
   free(outfile);
 
   if (redig) {
-    free(cbuf);
+    free(cbuf[0]);
+    free(cbuf[1]);
     cudaFree(bs1);
     cudaFree(bs2);
     cudaFree(zavg);
     cudaFree(zstd);
     cudaFree(dcbuf);
   } else {
-    free(cbuff);
+    free(cbuff[0]);
+    free(cbuff[1]);
     if (ndec > 1) cudaFree(dcbuff);
   }
 
