@@ -83,8 +83,8 @@ int main(int argc,char *argv[])
   int idm,iblock,nread_tmp,nread,mchan,msamp,mblock,msum=1024;
   char *header,*udpbuf[4],*dudpbuf[4];
   FILE *file;
-  unsigned char **cbuf,*dcbuf;
-  float **cbuff, *dcbuff;
+  unsigned char *cbuf[2],*dcbuf;
+  float *cbuff[2], *dcbuff;
   float *fbuf,*dfbuf;
   float *bs1,*bs2,*zavg,*zstd;
   cufftComplex *cp1,*cp2,*dc,*cp1p,*cp2p;
