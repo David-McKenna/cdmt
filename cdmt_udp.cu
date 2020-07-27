@@ -11,6 +11,7 @@
 #include <helper_cuda.h>
 #include <getopt.h>
 #include <limits.h>
+#include <omp.h>
 
 #include "udpPacketManager/lofar_udp_reader.h"
 #include "udpPacketManager/lofar_udp_misc.h"
@@ -37,6 +38,8 @@ static __device__ __host__ inline cufftComplex ComplexScale(cufftComplex a,float
 static __device__ __host__ inline cufftComplex ComplexMul(cufftComplex a,cufftComplex b);
 static __global__ void PointwiseComplexMultiply(cufftComplex *a,cufftComplex *b,cufftComplex *c,int nx,int ny,int l,float scale);
 __global__ void unpack_and_padd(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2);
+__global__ void unpack_and_padd_first_iteration(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2);
+__global__ void padd_next_iteration(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2);
 __global__ void swap_spectrum_halves(cufftComplex *cp1,cufftComplex *cp2,int nx,int ny);
 __global__ void compute_chirp(double fcen,double bw,float *dm,int nchan,int nbin,int nsub,int ndm,cufftComplex *c);
 __global__ void compute_block_sums(float *z,int nchan,int nblock,int nsum,float *bs1,float *bs2);
@@ -95,7 +98,7 @@ int main(int argc,char *argv[])
   int bytes_read;
   long int ts_read=LONG_MAX,ts_skip=0;
   long int total_ts_read=0;
-  int part=0,device=0,verbose=0,nforward=128,redig=1,ports=4,tel=0;
+  int part=0,device=0,verbose=0,nforward=128,redig=1,ports=4;
   int arg=0;
   FILE **outfile;
 
@@ -199,11 +202,11 @@ int main(int argc,char *argv[])
  
   // Read sigproc header
   hdr = read_sigproc_header(sphdrfname, udpfname, ports);
-
-  const float stg1 = abs(pow(hdr.fch1,-2) - pow(hdr.fch1 + hdr.nsub * hdr.foff, -2));
-  const float stg2 = 2.41e-4;
-  const int overlapCheck = (int) (stg2 * stg1 * (dm_start + dm_step * ndm) / nchan / pow(hdr.tsamp, 2));
-  if (overlapCheck > noverlap) {
+  const double stg1 = (1.0 / 2.41e-4) *  abs(pow((double) hdr.fch1 + hdr.nsub * hdr.foff + hdr.foff *0.5,-2.0) - pow((double) hdr.fch1 + hdr.nsub * hdr.foff - hdr.foff *0.5, -2.0));
+  const int overlapCheck = (int) (stg1 * (dm_start + dm_step * ndm)/ hdr.tsamp);
+  if (overlapCheck > nbin) {
+    fprintf(stderr, "WARNING: The size of your FFT bin is too short for the given DMs and frequencies. Given bin size: %d, Suggested minimum bin size: %d\n", nbin, overlapCheck);
+  } else if (overlapCheck > noverlap) {
     fprintf(stderr, "WARNING: The size of your FFT overlap is too short for the given maximum DM. Given overlap: %d, Suggested minimum overlap: %d.\n", noverlap, overlapCheck);
   }
 
@@ -242,6 +245,9 @@ int main(int argc,char *argv[])
   msamp=nsamp/nchan; // nforward * nvalid must be divisble by 8
   mblock=msamp/msum; // nforward * nvalid / 8 must be disible by 1024
 
+  long unsigned int bytesUsed = sizeof(cufftComplex) * nbin * nfft * nsub * 4 + sizeof(cufftComplex) * nbin *nsub * ndm + sizeof(float) * mblock * mchan * 2 + sizeof(char) * nsamp * nsub * 4 + sizeof(float) * nsamp * nsub + redig * msamp * mchan / ndec - (redig - 1) * 4 * msamp * mchan * ndec;
+  printf("We anticipate %ld GB (%ld bytes) to be allocated on the GPU.\n", bytesUsed >> 30, bytesUsed);
+
 
   const long int packetGulp = nsamp / 16;
   reader = lofar_udp_meta_file_reader_setup(inputFiles, ports, 1, 11, 1, packetGulp, (long) -1, LONG_MAX, compressedInput);
@@ -265,17 +271,31 @@ int main(int argc,char *argv[])
   // Set device
   checkCudaErrors(cudaSetDevice(device));
 
+  // Generate streams for asyncrnous operations
+  cudaStream_t streams[3];
+  for (i = 0; i < 3; i++)
+    checkCudaErrors(cudaStreamCreate(&(streams[i])));
+
+  // Create 2 events; one which blocks execution (preventing new data reads) and the other waiting for compute to finish.
+  cudaEvent_t events[2];
+  cudaEventCreateWithFlags(&(events[0]), cudaEventBlockingSync & cudaEventDisableTiming);
+  cudaEventCreateWithFlags(&(events[1]), cudaEventDisableTiming);
+
   // DMcK: cuFFT docs say it's best practice to plan before allocating memory
   // cuda-memcheck fails initialisation before this block is run?
   // Generate FFT plan (batch in-place forward FFT)
   idist=nbin;  odist=nbin;  iembed=nbin;  oembed=nbin;  istride=1;  ostride=1;
   checkCudaErrors(cufftPlanMany(&ftc2cf,1,&nbin,&iembed,istride,idist,&oembed,ostride,odist,CUFFT_C2C,nfft*nsub));
+  cufftSetStream(ftc2cf,streams[0]);
   cudaDeviceSynchronize();
+  // Total malloc (FFT forward)
 
   // Generate FFT plan (batch in-place backward FFT)
   idist=mbin;  odist=mbin;  iembed=mbin;  oembed=mbin;  istride=1;  ostride=1;
   checkCudaErrors(cufftPlanMany(&ftc2cb,1,&mbin,&iembed,istride,idist,&oembed,ostride,odist,CUFFT_C2C,nchan*nfft*nsub));
+  cufftSetStream(ftc2cb,streams[0]);
   cudaDeviceSynchronize();
+  // Total malloc (backward)
 
   // Allocate memory for complex timeseries
   checkCudaErrors(cudaMalloc((void **) &cp1,  (size_t) sizeof(cufftComplex)*nbin*nfft*nsub));
@@ -310,8 +330,7 @@ int main(int argc,char *argv[])
   if (redig) {
     cbuf=(unsigned char *) malloc(sizeof(unsigned char)*msamp*mchan/ndec);
     checkCudaErrors(cudaMalloc((void **) &dcbuf, (size_t) sizeof(unsigned char)*msamp*mchan/ndec));
-  }
-  else {
+  } else {
     cbuff = (float *) malloc(sizeof(float)*msamp*mchan/ndec);
     if (ndec > 1) checkCudaErrors(cudaMalloc((void **) &dcbuff, (size_t) sizeof(float)*msamp*mchan/ndec));
   }
@@ -371,48 +390,72 @@ int main(int argc,char *argv[])
   // Loop over input file contents
   double timeInSeconds = 0.0;
   nread = INT_MAX;
+
+  omp_lock_t readingLock;
+  omp_init_lock(&readingLock);
+
   // Skip the first noverlap samples as they are 0'd
-  int writeOffset = noverlap * hdr.nchan;
+  int writeOffset = noverlap * 2;
+  #pragma omp parallel for ordered schedule(static, 1)
   for (iblock=0;;iblock++) {
+    #pragma omp cancellation point parallel
+
+
+    // Ge tthe current stream from block iteration
+    int streamIdx = iblock % 2;
+    cudaStream_t stream = streams[streamIdx];
     // Read block
-    startclock=clock();
+    #pragma omp ordered single
+    {
 
-    nread_tmp = reshapeRawUdp(reader);
+      cudaEventSynchronize(events[0]);
+      startclock=clock();
+      nread_tmp = reshapeRawUdp(reader);
 
-    if (nread > nread_tmp) {
-      nread = nread_tmp;
+      if (nread > nread_tmp) {
+        nread = nread_tmp;
+      }
+
+      if (nread==0) {
+        printf("No data read from last file; assuming EOF, finishng up.\n");
+        #pragma omp cancel parallel for
+      } else if (iblock != 0 && nread < nread_tmp) {
+        printf("Received less data than expected; we may have parsed out of order data or we are nearing the EOF.\n");
+      }
+
+      // Count up the total bytes read
+      total_ts_read += nread;
+      printf("Block: %d: Read %ld MB in %.2f s\n",iblock,sizeof(char)*nread*nsub*4/(1<<20),(float) (clock()-startclock)/CLOCKS_PER_SEC);
+
+      omp_set_lock(&readingLock);
+      cudaStreamWaitEvent(stream, events[1], 0);
+      // Copy buffers to device
+      startclock=clock();
+      for (i=0;i<4;i++)
+        checkCudaErrors(cudaMemcpyAsync(dudpbuf[i],udpbuf[i],sizeof(char)*nread*nsub,cudaMemcpyHostToDevice,stream));
+
+      cudaEventRecord(events[0], stream);
     }
-
-    if (nread==0) {
-      printf("No data read from last file; assuming EOF, finishng up.\n");
-      break;
-    } else if (iblock != 0 && nread < nread_tmp) {
-      printf("Received less data than expected; we may have parsed out of order data or we are nearing the EOF.\n");
-    }
-
-    // Count up the total bytes read
-    total_ts_read += nread;
-
-    printf("Block: %d: Read %ld MB in %.2f s\n",iblock,sizeof(char)*nread*nsub*4/(1<<20),(float) (clock()-startclock)/CLOCKS_PER_SEC);
-
-    // Copy buffers to device
-    startclock=clock();
-    for (i=0;i<4;i++)
-      checkCudaErrors(cudaMemcpy(dudpbuf[i],udpbuf[i],sizeof(char)*nread*nsub,cudaMemcpyHostToDevice));
-
     // Unpack data and padd data
     blocksize.x=32; blocksize.y=32; blocksize.z=1;
     gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft/blocksize.y+1; gridsize.z=nsub/blocksize.z+1;
-    unpack_and_padd<<<gridsize,blocksize>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
+    if (iblock > 0) {
+      unpack_and_padd<<<gridsize,blocksize,0,stream>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
+    }
+    else {
+      unpack_and_padd_first_iteration<<<gridsize,blocksize,0,stream>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);;
+    }
 
     // Perform FFTs
+    cufftSetStream(ftc2cf, stream);
+    cufftSetStream(ftc2cb, stream);
     checkCudaErrors(cufftExecC2C(ftc2cf,(cufftComplex *) cp1p,(cufftComplex *) cp1p,CUFFT_FORWARD));
     checkCudaErrors(cufftExecC2C(ftc2cf,(cufftComplex *) cp2p,(cufftComplex *) cp2p,CUFFT_FORWARD));
 
     // Swap spectrum halves for large FFTs
     blocksize.x=32; blocksize.y=32; blocksize.z=1;
     gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft*nsub/blocksize.y+1; gridsize.z=1;
-    swap_spectrum_halves<<<gridsize,blocksize>>>(cp1p,cp2p,nbin,nfft*nsub);
+    swap_spectrum_halves<<<gridsize,blocksize,0,stream>>>(cp1p,cp2p,nbin,nfft*nsub);
 
     // Loop over dms
     for (idm=0;idm<ndm;idm++) {
@@ -420,13 +463,22 @@ int main(int argc,char *argv[])
       // Perform complex multiplication of FFT'ed data with chirp
       blocksize.x=32; blocksize.y=32; blocksize.z=1;
       gridsize.x=nbin*nsub/blocksize.x+1; gridsize.y=nfft/blocksize.y+1; gridsize.z=1;
-      PointwiseComplexMultiply<<<gridsize,blocksize>>>(cp1p,dc,cp1,nbin*nsub,nfft,idm,1.0/(float) nbin);
-      PointwiseComplexMultiply<<<gridsize,blocksize>>>(cp2p,dc,cp2,nbin*nsub,nfft,idm,1.0/(float) nbin);
+      PointwiseComplexMultiply<<<gridsize,blocksize,0,stream>>>(cp1p,dc,cp1,nbin*nsub,nfft,idm,1.0/(float) nbin);
+      PointwiseComplexMultiply<<<gridsize,blocksize,0,stream>>>(cp2p,dc,cp2,nbin*nsub,nfft,idm,1.0/(float) nbin);
       
+      // end of cp1p/cp2p needed
+
+      if (idm == ndm - 1) {
+        blocksize.x=32; blocksize.y=32; blocksize.z=1;
+        gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft/blocksize.y+1; gridsize.z=nsub/blocksize.z+1;
+        padd_next_iteration<<<gridsize,blocksize,0,streams[2]>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
+        cudaEventRecord(events[1], streams[2]);
+        omp_unset_lock(&readingLock);
+      }
       // Swap spectrum halves for small FFTs
       blocksize.x=32; blocksize.y=32; blocksize.z=1;
       gridsize.x=mbin/blocksize.x+1; gridsize.y=nchan*nfft*nsub/blocksize.y+1; gridsize.z=1;
-      swap_spectrum_halves<<<gridsize,blocksize>>>(cp1,cp2,mbin,nchan*nfft*nsub);
+      swap_spectrum_halves<<<gridsize,blocksize,0,stream>>>(cp1,cp2,mbin,nchan*nfft*nsub);
       
       // Perform FFTs
       checkCudaErrors(cufftExecC2C(ftc2cb,(cufftComplex *) cp1,(cufftComplex *) cp1,CUFFT_INVERSE));
@@ -435,54 +487,64 @@ int main(int argc,char *argv[])
       // Detect data
       blocksize.x=32; blocksize.y=32; blocksize.z=1;
       gridsize.x=mbin/blocksize.x+1; gridsize.y=nchan/blocksize.y+1; gridsize.z=nfft/blocksize.z+1;
-      transpose_unpadd_and_detect<<<gridsize,blocksize>>>(cp1,cp2,mbin,nchan,nfft,nsub,noverlap/nchan,nread/nchan,dfbuf);
+      transpose_unpadd_and_detect<<<gridsize,blocksize,0,stream>>>(cp1,cp2,mbin,nchan,nfft,nsub,noverlap/nchan,nread/nchan,dfbuf);
+      
+      // end of cp1/cp2 needed
       
       if (redig) {
         // Compute block sums for redigitization
         blocksize.x=32; blocksize.y=32; blocksize.z=1;
         gridsize.x=mchan/blocksize.x+1; gridsize.y=mblock/blocksize.y+1; gridsize.z=1;
-        compute_block_sums<<<gridsize,blocksize>>>(dfbuf,mchan,mblock,msum,bs1,bs2);
+        compute_block_sums<<<gridsize,blocksize,0,stream>>>(dfbuf,mchan,mblock,msum,bs1,bs2);
         
         // Compute channel stats
         blocksize.x=32; blocksize.y=1; blocksize.z=1;
         gridsize.x=mchan/blocksize.x+1; gridsize.y=1; gridsize.z=1;
-        compute_channel_statistics<<<gridsize,blocksize>>>(mchan,mblock,msum,bs1,bs2,zavg,zstd);
+        compute_channel_statistics<<<gridsize,blocksize,0,stream>>>(mchan,mblock,msum,bs1,bs2,zavg,zstd);
 
         // Redigitize data to 8bits
         blocksize.x=32; blocksize.y=32; blocksize.z=1;
         gridsize.x=mchan/blocksize.x+1; gridsize.y=mblock/blocksize.y+1; gridsize.z=1;
         if (ndec==1)
-    redigitize<<<gridsize,blocksize>>>(dfbuf,mchan,mblock,msum,zavg,zstd,3.0,5.0,dcbuf);
+    redigitize<<<gridsize,blocksize,0,stream>>>(dfbuf,mchan,mblock,msum,zavg,zstd,3.0,5.0,dcbuf);
         else
-    decimate_and_redigitize<<<gridsize,blocksize>>>(dfbuf,ndec,mchan,mblock,msum,zavg,zstd,3.0,5.0,dcbuf);      
+    decimate_and_redigitize<<<gridsize,blocksize,0,stream>>>(dfbuf,ndec,mchan,mblock,msum,zavg,zstd,3.0,5.0,dcbuf);      
 
         // Copy buffer to host
-        checkCudaErrors(cudaMemcpy(cbuf,dcbuf,sizeof(unsigned char)*msamp*mchan/ndec,cudaMemcpyDeviceToHost));
+        checkCudaErrors(cudaMemcpyAsync(cbuf,dcbuf,sizeof(unsigned char)*msamp*mchan/ndec,cudaMemcpyDeviceToHost,stream));
         // Write buffer
-        fwrite(cbuf,sizeof(char),nread*nsub/ndec,outfile[idm]);
+        fwrite(cbuf,sizeof(char),(nread-writeOffset)*nsub/ndec,outfile[idm]);
 
       } else {
         if (ndec==1) checkCudaErrors(cudaMemcpy(cbuff, dfbuf,sizeof(float)*msamp*mchan,cudaMemcpyDeviceToHost));
         else {
           blocksize.x=32; blocksize.y=32; blocksize.z=1;
           gridsize.x=mchan/blocksize.x+1; gridsize.y=mblock/blocksize.y+1; gridsize.z=1;
-          decimate<<<gridsize,blocksize>>>(dfbuf,ndec,mchan,mblock,msum,dcbuff);
-          checkCudaErrors(cudaMemcpy(cbuff,dcbuff,sizeof(float)*msamp*mchan/ndec,cudaMemcpyDeviceToHost));
+          decimate<<<gridsize,blocksize,0,stream>>>(dfbuf,ndec,mchan,mblock,msum,dcbuff);
+          checkCudaErrors(cudaMemcpyAsync(cbuff,dcbuff,sizeof(float)*msamp*mchan/ndec,cudaMemcpyDeviceToHost,stream));
         }
 
-        fwrite(cbuff,sizeof(float),nread*nsub/ndec, outfile[idm]);
+        fwrite(cbuff,sizeof(float),(nread-writeOffset)*nsub/ndec, outfile[idm]);
       }
-
-      // Write buffer
     }
+
+    blocksize.x=32; blocksize.y=32; blocksize.z=1;
+    gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft/blocksize.y+1; gridsize.z=nsub/blocksize.z+1;
+    padd_next_iteration<<<gridsize,blocksize>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
+
     printf("Processed %d DMs in %.2f s\n",ndm,(float) (clock()-startclock)/CLOCKS_PER_SEC);
-    timeInSeconds += (double) nread * timeOffset;
+    timeInSeconds += (double) (nread - writeOffset) * timeOffset;
     printf("Current data processed: %02ld:%02ld:%05.2lf (%1.2lfs)\n\n", (long int) (timeInSeconds / 3600.0), (long int) ((fmod(timeInSeconds, 3600.0)) / 60.0), fmod(timeInSeconds, 60.0), timeInSeconds);
     // Exit when we pass the read length limit
-    if (total_ts_read > ts_read)
-      break;
+    if (total_ts_read > ts_read) {
+      #pragma omp cancel parallel for
+    }
+    // Reset the write offset after the first iteration
+    if (iblock == 0)
+      writeOffset = 0;
   }
 
+  omp_destroy_lock(&readingLock);
   // Close files
   for (i=0;i<ndm;i++)
     fclose(outfile[i]);
@@ -522,6 +584,11 @@ int main(int argc,char *argv[])
   // Free plan
   cufftDestroy(ftc2cf);
   cufftDestroy(ftc2cb);
+
+  for(i = 0; i < 3; i++)
+    cudaStreamDestroy(streams[i]);
+  for(i = 0; i < 2; i++)
+    cudaEventDestroy(events[i]);
 
   return 0;
 }
@@ -808,9 +875,6 @@ __global__ void compute_chirp(double fcen,double bw,float *dm,int nchan,int nbin
 // Unpack the input buffer and generate complex timeseries. The output
 // timeseries are padded with noverlap samples on either side for the
 // convolution.
-// Unpack the input buffer and generate complex timeseries. The output
-// timeseries are padded with noverlap samples on either side for the
-// convolution.
 __global__ void unpack_and_padd(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2)
 {
   int64_t ibin,ifft,isamp,isub,idx1,idx2;
@@ -822,15 +886,10 @@ __global__ void unpack_and_padd(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,
 
   // Only compute valid threads
   if (ibin<nbin && ifft<nfft && isub<nsub) {
-    idx1=ibin+nbin*isub+nsub*nbin*ifft;
     isamp=ibin+(nbin-2*noverlap)*ifft-noverlap;
-    idx2=isub+nsub*isamp;
-    if (isamp<0 || isamp>=nsamp) {
-      cp1[idx1].x=0.0;
-      cp1[idx1].y=0.0;
-      cp2[idx1].x=0.0;
-      cp2[idx1].y=0.0;
-    } else {
+    if (isamp >= noverlap) {
+      idx1=ibin+nbin*isub+nsub*nbin*ifft;
+      idx2=isub+nsub*(isamp-noverlap);
       cp1[idx1].x=(float) dbuf0[idx2];
       cp1[idx1].y=(float) dbuf1[idx2];
       cp2[idx1].x=(float) dbuf2[idx2];
@@ -840,6 +899,73 @@ __global__ void unpack_and_padd(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,
 
   return;
 }
+
+// Unpack the input buffer and generate complex timeseries. The output
+// timeseries are padded with noverlap samples on either side for the
+// convolution. This is separate from the main kernel to minimise performance
+// loss to branching on the GPU. On the first iteration, we want to fill
+// the final non-noverlap region and final noverlap region so that they can 
+// match the first noverlap region and first non-noverlap on the second
+// iteration
+__global__ void unpack_and_padd_first_iteration(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2)
+{
+  int64_t ibin,ifft,isamp,isub,idx1,idx2;
+
+  // Indices of input data
+  ibin=blockIdx.x*blockDim.x+threadIdx.x;
+  ifft=blockIdx.y*blockDim.y+threadIdx.y;
+  isub=blockIdx.z*blockDim.z+threadIdx.z;
+
+  // Only compute valid threads
+  if (ibin<nbin && ifft<nfft && isub<nsub) {
+    isamp=ibin+(nbin-2*noverlap)*ifft-noverlap;
+    if (isamp >= 2*noverlap) {
+      idx1=ibin+nbin*isub+nsub*nbin*ifft;
+
+      idx2=isub+nsub*(isamp-2*noverlap);
+      cp1[idx1].x=(float) dbuf0[idx2];
+      cp1[idx1].y=(float) dbuf1[idx2];
+      cp2[idx1].x=(float) dbuf2[idx2];
+      cp2[idx1].y=(float) dbuf3[idx2];
+    }
+  }
+
+  return;
+}
+
+// Unpack the input buffer and generate complex timeseries. The output
+// timeseries are located in the first noverlap region and first non-
+// noverlap region, for continuous time series between data blocks
+// 
+// overlap_(timeblock)_(index)
+// t = 0: overlap_0_0: nfft_0_0, nfft_0_1... nfft_0_N-1, nfft_0 N: overlap_0_1
+// t = 1: nfft_0_N: overlap_0_1, nfft_1_0.... nfft_1_N-1:overlap_1_1
+// t = 2 nfft_1_N-1: overlap_1_1...
+// etc
+__global__ void padd_next_iteration(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2)
+{
+  int64_t ibin,ifft,isamp,isub,idx1,idx2;
+
+  // Indices of input data
+  ibin=blockIdx.x*blockDim.x+threadIdx.x;
+  ifft=blockIdx.y*blockDim.y+threadIdx.y;
+  isub=blockIdx.z*blockDim.z+threadIdx.z;
+
+  // Only compute valid threads
+  if (ibin<nbin && ifft<nfft && isub<nsub) {
+    isamp=ibin+(nbin-2*noverlap)*ifft-noverlap;
+    if (isamp<noverlap) {
+      // VVV FIX
+      idx1=ibin+nbin*isub+nsub*nbin*ifft;
+      idx2=isub+nsub*(isamp+nsamp);
+      cp1[idx1].x=(float) dbuf0[idx2];
+      cp1[idx1].y=(float) dbuf1[idx2];
+      cp2[idx1].x=(float) dbuf2[idx2];
+      cp2[idx1].y=(float) dbuf3[idx2];
+    }
+  }
+}
+
 
 // Since complex-to-complex FFTs put the center frequency at bin zero
 // in the frequency domain, the two halves of the spectrum need to be
