@@ -528,9 +528,6 @@ int main(int argc,char *argv[])
       }
     }
 
-    blocksize.x=32; blocksize.y=32; blocksize.z=1;
-    gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft/blocksize.y+1; gridsize.z=nsub/blocksize.z+1;
-    padd_next_iteration<<<gridsize,blocksize>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
 
     printf("Processed %d DMs in %.2f s\n",ndm,(float) (clock()-startclock)/CLOCKS_PER_SEC);
     timeInSeconds += (double) (nread - writeOffset) * timeOffset;
@@ -957,7 +954,7 @@ __global__ void padd_next_iteration(char *dbuf0,char *dbuf1,char *dbuf2,char *db
     if (isamp<noverlap) {
       // VVV FIX
       idx1=ibin+nbin*isub+nsub*nbin*ifft;
-      idx2=isub+nsub*(isamp+nsamp);
+      idx2=isub+nsub*(isamp+nsamp-noverlap);
       cp1[idx1].x=(float) dbuf0[idx2];
       cp1[idx1].y=(float) dbuf1[idx2];
       cp2[idx1].x=(float) dbuf2[idx2];
