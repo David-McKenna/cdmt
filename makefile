@@ -2,11 +2,11 @@
 CUDAPATH = /usr/$(shell test -d /usr/lib/cuda && echo lib/cuda || echo local/cuda)
 
 # Compiling flags
-CFLAGS = -I./cuda-samples/Common -I/usr/include/hdf5/serial/ -I./udpPacketManager/
+CFLAGS = -I./cuda-samples/Common -I/usr/include/hdf5/serial/ -I./udpPacketManager/ -Xcompiler -fopenmp
 
 # Linking flags
 LFLAGS = -lm -L$(CUDAPATH)/lib64 -lcufft -lhdf5 -lcurand
-LFLAGS_udp = -lm -L$(CUDAPATH)/lib64 -L./cuda-samples/Common -lcufft -lcurand -lzstd
+LFLAGS_udp = -lm -L$(CUDAPATH)/lib64 -L./cuda-samples/Common -lcufft -lcurand -lzstd -lgomp
 
 # Compilers
 NVCC = $(CUDAPATH)/bin/nvcc -arch=sm_70 -O3 --use_fast_math
