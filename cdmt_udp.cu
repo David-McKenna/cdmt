@@ -83,8 +83,8 @@ int main(int argc,char *argv[])
   int idm,iblock,nread_tmp,nread,mchan,msamp,mblock,msum=1024;
   char *header,*udpbuf[4],*dudpbuf[4];
   FILE *file;
-  unsigned char *cbuf[2],*dcbuf;
-  float *cbuff[2], *dcbuff;
+  unsigned char **cbuf[2],*dcbuf;
+  float **cbuff[2], *dcbuff;
   float *fbuf,*dfbuf;
   float *bs1,*bs2,*zavg,*zstd;
   cufftComplex *cp1,*cp2,*dc,*cp1p,*cp2p;
@@ -282,6 +282,11 @@ int main(int argc,char *argv[])
   cudaEventCreateWithFlags(&(events[1]), cudaEventDisableTiming);
   cudaEventCreateWithFlags(&(events[2]), cudaEventDisableTiming);
 
+  cudaEvent_t dmWriteEvents[2][ndm];
+  for (i =0; i < ndm; i++)
+    for (j = 0; j < 2; j++)
+      cudaEventCreateWithFlags(&(dmWriteEvents[j][i]), cudaEventBlockingSync & cudaEventDisableTiming);
+
   // DMcK: cuFFT docs say it's best practice to plan before allocating memory
   // cuda-memcheck fails initialisation before this block is run?
   // Generate FFT plan (batch in-place forward FFT)
@@ -329,12 +334,14 @@ int main(int argc,char *argv[])
   checkCudaErrors(cudaMalloc((void **) &dfbuf, (size_t) sizeof(float)*nsamp*nsub));
   
   if (redig) {
-    cbuf[0]=(unsigned char *) malloc(sizeof(unsigned char)*msamp*mchan/ndec);
-    cbuf[1]=(unsigned char *) malloc(sizeof(unsigned char)*msamp*mchan/ndec);
+    for (i = 0; i < ndm; i++)
+      for (j = 0; j < 2; j++)
+        cbuf[j][i]=(unsigned char *) malloc(sizeof(unsigned char)*msamp*mchan/ndec);
     checkCudaErrors(cudaMalloc((void **) &dcbuf, (size_t) sizeof(unsigned char)*msamp*mchan/ndec));
   } else {
-    cbuff[0] = (float *) malloc(sizeof(float)*msamp*mchan/ndec);
-    cbuff[1] = (float *) malloc(sizeof(float)*msamp*mchan/ndec);
+    for (i = 0; i < ndm; i++)
+      for (j = 0; j < 2; j++)
+        cbuff[j][i] = (float *) malloc(sizeof(float)*msamp*mchan/ndec);
     if (ndec > 1) checkCudaErrors(cudaMalloc((void **) &dcbuff, (size_t) sizeof(float)*msamp*mchan/ndec));
   }
 
@@ -522,23 +529,38 @@ int main(int argc,char *argv[])
 
         // Copy buffer to host
         checkCudaErrors(cudaMemcpyAsync(cbuf[streamIdx],dcbuf,sizeof(unsigned char)*msamp*mchan/ndec,cudaMemcpyDeviceToHost,stream));
+
+        cudaEventRecord(dmWriteEvents[streamIdx][idm]);
+
+        #pragma omp task
+        {
+          write_to_disk_char(&(cbuf[streamIdx][writeOffset*nsub/ndec]), outfile[idm], (nread-writeOffset)*nsub/ndec, dmWriteEvents[streamIdx][idm]);
+        }
         // Write buffer
         fwrite(&(cbuf[streamIdx][writeOffset*nsub/ndec]),sizeof(char),(nread-writeOffset)*nsub/ndec,outfile[idm]);
 
       } else {
-        if (ndec==1) checkCudaErrors(cudaMemcpyAsync(cbuff[streamIdx], dfbuf,sizeof(float)*msamp*mchan,cudaMemcpyDeviceToHost,stream));
-        else {
+        if (ndec==1) {
+          checkCudaErrors(cudaMemcpyAsync(cbuff[streamIdx], dfbuf,sizeof(float)*msamp*mchan,cudaMemcpyDeviceToHost,stream));
+          
+        } else {
           blocksize.x=32; blocksize.y=32; blocksize.z=1;
           gridsize.x=mchan/blocksize.x+1; gridsize.y=mblock/blocksize.y+1; gridsize.z=1;
           decimate<<<gridsize,blocksize,0,stream>>>(dfbuf,ndec,mchan,mblock,msum,dcbuff);
           checkCudaErrors(cudaMemcpyAsync(cbuff[streamIdx],dcbuff,sizeof(float)*msamp*mchan/ndec,cudaMemcpyDeviceToHost,stream));
         }
 
-        fwrite(&(cbuff[streamIdx][writeOffset*nsub/ndec]),sizeof(float),(nread-writeOffset)*nsub/ndec, outfile[idm]);
+        cudaEventRecord(dmWriteEvents[streamIdx][idm]);
+
+        #pragma omp task
+        {
+          write_to_disk_float(&(cbuff[streamIdx][writeOffset*nsub/ndec]), outfile[idm], (nread-writeOffset)*nsub/ndec, dmWriteEvents[streamIdx][idm]);
+        }
       }
     }
 
-
+    #pragma omp taskwait
+    
     printf("Processed %d DMs in %.2f s\n",ndm,(float) (clock()-startclock)/CLOCKS_PER_SEC);
     timeInSeconds += (double) (nread - writeOffset) * timeOffset;
     printf("Current data processed: %02ld:%02ld:%05.2lf (%1.2lfs)\n\n", (long int) (timeInSeconds / 3600.0), (long int) ((fmod(timeInSeconds, 3600.0)) / 60.0), fmod(timeInSeconds, 60.0), timeInSeconds);
@@ -598,6 +620,19 @@ int main(int argc,char *argv[])
     cudaEventDestroy(events[i]);
 
   return 0;
+}
+
+
+void write_to_disk_float(float* outputArray, FILE* outputFile, int nsamples, cudaEvent_t waitEvent)
+{
+  cudaEventSynchronize(waitEvent);
+  fwrite(outputArray,sizeof(float),nsamples, outputFile); 
+}
+
+void write_to_disk_char(char* outputArray, FILE* outputFile, int nsamples, cudaEvent_t waitEvent)
+{
+  cudaEventSynchronize(waitEvent);
+  fwrite(outputArray,sizeof(char),nsamples, outputFile); 
 }
 
 
