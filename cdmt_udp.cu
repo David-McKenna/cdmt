@@ -462,7 +462,6 @@ int main(int argc,char *argv[])
     gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft*nsub/blocksize.y+1; gridsize.z=1;
     swap_spectrum_halves<<<gridsize,blocksize,0,stream>>>(cp1p,cp2p,nbin,nfft*nsub);
 
-    #pragma omp taskwait
     // Loop over dms
     for (idm=0;idm<ndm;idm++) {
 
@@ -622,9 +621,7 @@ int main(int argc,char *argv[])
 void write_to_disk_float(float* outputArray, FILE** outputFile, int nsamples, cudaEvent_t* waitEvent)
 {
   cudaEventSynchronize(*waitEvent);
-  printf("%d\n", nsamples);
   fwrite(outputArray,sizeof(float),nsamples, *outputFile); 
-  printf("exit\n");
 }
 
 void write_to_disk_char(unsigned char* outputArray, FILE** outputFile, int nsamples, cudaEvent_t* waitEvent)
@@ -962,7 +959,7 @@ __global__ void unpack_and_padd_first_iteration(char *dbuf0,char *dbuf1,char *db
     if (isamp >= 2*noverlap) {
       idx1=ibin+nbin*isub+nsub*nbin*ifft;
 
-      idx2=isub+nsub*(isamp-2*noverlap);
+      idx2=isub+nsub*(isamp-noverlap);
       cp1[idx1].x=(float) dbuf0[idx2];
       cp1[idx1].y=(float) dbuf1[idx2];
       cp2[idx1].x=(float) dbuf2[idx2];
