@@ -275,8 +275,10 @@ int main(int argc,char *argv[])
   checkCudaErrors(cudaSetDevice(device));
 
   // Generate streams for asyncrnous operations
-  cudaStream_t streams[1];
-  for (i = 0; i < 1; i++)
+  int numStreams = 1;
+  // Add an extra stream for the final padding operation
+  cudaStream_t streams[numStreams+1];
+  for (i = 0; i < numStreams+1; i++)
     checkCudaErrors(cudaStreamCreate(&(streams[i])));
 
   // Create 2 events; one which blocks execution (preventing new data reads) and the other waiting for compute to finish.
@@ -287,7 +289,7 @@ int main(int argc,char *argv[])
 
   cudaEvent_t dmWriteEvents[2][ndm];
   for (i =0; i < ndm; i++)
-    for (j = 0; j < 2; j++)
+    for (j = 0; j < numStreams; j++)
       cudaEventCreateWithFlags(&(dmWriteEvents[j][i]), cudaEventBlockingSync & cudaEventDisableTiming);
 
   // DMcK: cuFFT docs say it's best practice to plan before allocating memory
@@ -434,7 +436,7 @@ int main(int argc,char *argv[])
   for (int iblock=0;;iblock++) {
 
     // Ge tthe current stream from block iteration
-    int streamIdx = 0;
+    int streamIdx = iblock % numStreams;
     cudaStream_t stream = streams[streamIdx];
     // Read block
     //cudaEventSynchronize(events[0]);
@@ -500,8 +502,8 @@ int main(int argc,char *argv[])
 
         blocksize.x=32; blocksize.y=32; blocksize.z=1;
         gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft/blocksize.y+1; gridsize.z=nsub/blocksize.z+1;
-        padd_next_iteration<<<gridsize,blocksize,0,streams[2]>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
-        checkCudaErrors(cudaEventRecord(events[1], streams[2]));
+        padd_next_iteration<<<gridsize,blocksize,0,streams[numStreams]>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
+        checkCudaErrors(cudaEventRecord(events[1], streams[numStreams]));
       }
       // Swap spectrum halves for small FFTs
       blocksize.x=32; blocksize.y=32; blocksize.z=1;
