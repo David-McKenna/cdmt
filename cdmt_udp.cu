@@ -407,7 +407,7 @@ int main(int argc,char *argv[])
 
 
   // Skip the first noverlap samples as they are 0'd
-  int writeOffset = noverlap;
+  int writeOffset = 2 * noverlap;
   int writeSize;
 
   for (int iblock=0;;iblock++) {
@@ -958,8 +958,16 @@ __global__ void unpack_and_padd_first_iteration(char *dbuf0,char *dbuf1,char *db
     isamp=ibin+(nbin-2*noverlap)*ifft-noverlap;
     if (isamp >= 2*noverlap) {
       idx1=ibin+nbin*isub+nsub*nbin*ifft;
+      idx2=isub+nsub*(isamp-2*noverlap);
 
-      idx2=isub+nsub*(isamp-noverlap);
+      cp1[idx1].x=(float) dbuf0[idx2];
+      cp1[idx1].y=(float) dbuf1[idx2];
+      cp2[idx1].x=(float) dbuf2[idx2];
+      cp2[idx1].y=(float) dbuf3[idx2];
+    } else if (isamp >= noverlap) {
+      idx1=ibin+nbin*isub+nsub*nbin*ifft;
+      idx2=isub+nsub*(2*noverlap-isamp);
+
       cp1[idx1].x=(float) dbuf0[idx2];
       cp1[idx1].y=(float) dbuf1[idx2];
       cp2[idx1].x=(float) dbuf2[idx2];
