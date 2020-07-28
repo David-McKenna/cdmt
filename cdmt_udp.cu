@@ -275,8 +275,8 @@ int main(int argc,char *argv[])
   checkCudaErrors(cudaSetDevice(device));
 
   // Generate streams for asyncrnous operations
-  cudaStream_t streams[3];
-  for (i = 0; i < 3; i++)
+  cudaStream_t streams[1];
+  for (i = 0; i < 1; i++)
     checkCudaErrors(cudaStreamCreate(&(streams[i])));
 
   // Create 2 events; one which blocks execution (preventing new data reads) and the other waiting for compute to finish.
@@ -434,7 +434,7 @@ int main(int argc,char *argv[])
   for (int iblock=0;;iblock++) {
 
     // Ge tthe current stream from block iteration
-    int streamIdx = iblock % 2;
+    int streamIdx = 0;
     cudaStream_t stream = streams[streamIdx];
     // Read block
     //cudaEventSynchronize(events[0]);
