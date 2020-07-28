@@ -2,7 +2,7 @@
 CUDAPATH = /usr/$(shell test -d /usr/lib/cuda && echo lib/cuda || echo local/cuda)
 
 # Compiling flags
-CFLAGS = -I./cuda-samples/Common -I/usr/include/hdf5/serial/ -I./udpPacketManager/ -Xcompiler -fopenmp
+CFLAGS = -std=c++11 -I./cuda-samples/Common -I/usr/include/hdf5/serial/ -I./udpPacketManager/ -Xcompiler -fopenmp
 
 # Linking flags
 LFLAGS = -lm -L$(CUDAPATH)/lib64 -lcufft -lhdf5 -lcurand

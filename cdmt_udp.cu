@@ -100,7 +100,7 @@ int main(int argc,char *argv[])
   int bytes_read;
   long int ts_read=LONG_MAX,ts_skip=0;
   long int total_ts_read=0;
-  int part=0,device=0,verbose=0,nforward=128,redig=1,ports=4;
+  int part=0,device=0,nforward=128,redig=1,ports=4;
   int arg=0;
   FILE **outfile;
 
@@ -295,9 +295,13 @@ int main(int argc,char *argv[])
   // DMcK: cuFFT docs say it's best practice to plan before allocating memory
   // cuda-memcheck fails initialisation before this block is run? -- add =1 as an env flag
   
-  // Disable initial memory allocate
+  // Disable initial memory allocates and ilence the compiler  warnings; 
+  // Nvidia uses a custom compiler frontend so GCC pragmas do not work.
+  // This order-of-execution follows Nvidia's usage guidance
+  #pragma diag_suppress used_before_set
   cufftSetAutoAllocation(ftc2cf, 0);
   cufftSetAutoAllocation(ftc2cb, 0);
+  #pragma diag_default used_before_set
   size_t cfSize, cbSize;
 
   // Generate FFT plan (batch in-place forward FFT)
