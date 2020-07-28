@@ -291,20 +291,39 @@ int main(int argc,char *argv[])
       cudaEventCreateWithFlags(&(dmWriteEvents[j][i]), cudaEventBlockingSync & cudaEventDisableTiming);
 
   // DMcK: cuFFT docs say it's best practice to plan before allocating memory
-  // cuda-memcheck fails initialisation before this block is run?
+  // cuda-memcheck fails initialisation before this block is run? -- add =1 as an env flag
+  
+  // Disable initial memory allocate
+  cufftSetAutoAllocation(ftc2cf, 0);
+  cufftSetAutoAllocation(ftc2cb, 0);
+  size_t cfSize, cbSize;
+
   // Generate FFT plan (batch in-place forward FFT)
   idist=nbin;  odist=nbin;  iembed=nbin;  oembed=nbin;  istride=1;  ostride=1;
   checkCudaErrors(cufftPlanMany(&ftc2cf,1,&nbin,&iembed,istride,idist,&oembed,ostride,odist,CUFFT_C2C,nfft*nsub));
+  checkCudaErrors(cufftGetSizeMany(ftc2cf, 1,&nbin,&iembed,istride,idist,&oembed,ostride,odist,CUFFT_C2C,nfft*nsub, &cfSize));
   cufftSetStream(ftc2cf,streams[0]);
-  cudaDeviceSynchronize();
   // Total malloc (FFT forward)
 
   // Generate FFT plan (batch in-place backward FFT)
   idist=mbin;  odist=mbin;  iembed=mbin;  oembed=mbin;  istride=1;  ostride=1;
   checkCudaErrors(cufftPlanMany(&ftc2cb,1,&mbin,&iembed,istride,idist,&oembed,ostride,odist,CUFFT_C2C,nchan*nfft*nsub));
+  checkCudaErrors(cufftGetSizeMany(ftc2cb, 1,&mbin,&iembed,istride,idist,&oembed,ostride,odist,CUFFT_C2C,nchan*nfft*nsub,&cbSize));
   cufftSetStream(ftc2cb,streams[0]);
   cudaDeviceSynchronize();
   // Total malloc (backward)
+
+  // Get the maximum size needed for the FFT operations
+
+  size_t minfftSize = cfSize > cbSize ? cfSize : cbSize;
+  printf("Allocated %ldMB for cuFFT work (instead of %ldMB)\n", minfftSize >> 20, (cfSize + cbSize) >> 20);
+  // Allocate the maxmimum memory needed
+  void* cufftWorkArea;
+  checkCudaErrors(cudaMalloc((void**) &cufftWorkArea, (size_t) minfftSize));
+  // Set the cuFFT handles to use this area
+  cufftSetWorkArea(ftc2cf, cufftWorkArea);
+  cufftSetWorkArea(ftc2cb, cufftWorkArea);
+
 
   // Allocate memory for complex timeseries
   checkCudaErrors(cudaMalloc((void **) &cp1,  (size_t) sizeof(cufftComplex)*nbin*nfft*nsub));
