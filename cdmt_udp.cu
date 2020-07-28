@@ -204,11 +204,13 @@ int main(int argc,char *argv[])
  
   // Read sigproc header
   hdr = read_sigproc_header(sphdrfname, udpfname, ports);
+
+  // Check that the bin size is sufficiently large
   const double stg1 = (1.0 / 2.41e-4) *  abs(pow((double) hdr.fch1 + hdr.nsub * hdr.foff + hdr.foff *0.5,-2.0) - pow((double) hdr.fch1 + hdr.nsub * hdr.foff - hdr.foff *0.5, -2.0));
   const int overlapCheck = (int) (stg1 * (dm_start + dm_step * ndm)/ hdr.tsamp);
   if (overlapCheck > nbin) {
     fprintf(stderr, "WARNING: The size of your FFT bin is too short for the given DMs and frequencies. Given bin size: %d, Suggested minimum bin size: %d\n", nbin, overlapCheck);
-  } else if (overlapCheck > noverlap) {
+  } else if (overlapCheck / nchan / 2 > noverlap) {
     fprintf(stderr, "WARNING: The size of your FFT overlap is too short for the given maximum DM. Given overlap: %d, Suggested minimum overlap: %d.\n", noverlap, overlapCheck);
   }
 
@@ -248,7 +250,7 @@ int main(int argc,char *argv[])
   mblock=msamp/msum; // nforward * nvalid / 8 must be disible by 1024
 
   long unsigned int bytesUsed = sizeof(cufftComplex) * nbin * nfft * nsub * 4 + sizeof(cufftComplex) * nbin *nsub * ndm + sizeof(float) * mblock * mchan * 2 + sizeof(char) * nsamp * nsub * 4 + sizeof(float) * nsamp * nsub + redig * msamp * mchan / ndec - (redig - 1) * 4 * msamp * mchan * ndec;
-  printf("We anticipate %ld GB (%ld bytes) to be allocated on the GPU.\n", bytesUsed >> 30, bytesUsed);
+  printf("We anticipate %ld GB (%ld bytes) to be allocated on the GPU (excluding cuFFT planning).\n", bytesUsed >> 30, bytesUsed);
 
 
   const long int packetGulp = nsamp / 16;
