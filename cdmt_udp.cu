@@ -309,7 +309,7 @@ int main(int argc,char *argv[])
   cudaEvent_t events[numEvents];
   cudaEventCreateWithFlags(&(events[0]), cudaEventBlockingSync & cudaEventDisableTiming);
   cudaEventCreateWithFlags(&(events[1]), cudaEventDisableTiming);
-  cudaEventCreateWithFlags(&(events[2]), cudaEventBlockingSync & cudaEventDisableTiming);
+  cudaEventCreateWithFlags(&(events[2]), cudaEventDisableTiming);
 
   cudaEvent_t dmWriteEvents[numStreams][ndm];
   for (i =0; i < ndm; i++)
@@ -466,25 +466,28 @@ int main(int argc,char *argv[])
   int writeOffset = 2 * noverlap;
   int writeSize;
 
+  int streamIdx = iblock % numStreams;
+  cudaStream_t stream = streams[streamIdx];
   for (int iblock=0;;iblock++) {
 
-    // Get the current stream from block iteration
-    int streamIdx = iblock % numStreams;
-    cudaStream_t stream = streams[streamIdx];
+    // Hold the host execution until we can confirm the async memory transfer for the raw data has finished
     cudaEventSynchronize(events[0]);
 
+    // Read in the next block
     startclock=clock();
     nread_tmp = reshapeRawUdp(reader);
     if (nread > nread_tmp) {
       nread = nread_tmp;
     }
 
+    // Determine the output length
     writeSize = (nread-writeOffset)*nsub/ndec;
 
-    // Count up the total bytes read
+    // Count up the total bytes read and calculate the read time
     total_ts_read += nread;
     printf("Block: %d: Read %ld MB in %.2f s\n",iblock,sizeof(char)*nread*nsub*4/(1<<20),(float) (clock()-startclock)/CLOCKS_PER_SEC);
 
+    // Sanity check the read data size
     if (nread==0) {
       printf("No data read from last file; assuming EOF, finishng up.\n");
       break;
@@ -492,15 +495,13 @@ int main(int argc,char *argv[])
       printf("Received less data than expected; we may have parsed out of order data or we are nearing the EOF.\n");
     }
 
-    // Copy buffers to device
+    // Copy buffers to device, waiting for the previous overlap operation to finish first
     cudaStreamWaitEvent(stream, events[1], 0);
-
     startclock=clock();
     for (i=0;i<4;i++)
       checkCudaErrors(cudaMemcpyAsync(dudpbuf[i],udpbuf[i],sizeof(char)*nread*nsub,cudaMemcpyHostToDevice,stream));
     cudaEventRecord(events[0], stream);
 
-    //checkCudaErrors(cudaEventRecord(events[0], stream));
     // Unpack data and padd data
     blocksize.x=32; blocksize.y=32; blocksize.z=1;
     gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft/blocksize.y+1; gridsize.z=nsub/blocksize.z+1;
@@ -511,7 +512,7 @@ int main(int argc,char *argv[])
     }
 
     // Perform FFTs
-    cudaEventSynchronize(events[2]);
+    cudaStreamWaitEvent(stream, events[2], 0;)
     cufftSetStream(ftc2cf, stream);
     checkCudaErrors(cufftExecC2C(ftc2cf,(cufftComplex *) cp1p,(cufftComplex *) cp1p,CUFFT_FORWARD));
     checkCudaErrors(cufftExecC2C(ftc2cf,(cufftComplex *) cp2p,(cufftComplex *) cp2p,CUFFT_FORWARD));
@@ -531,16 +532,14 @@ int main(int argc,char *argv[])
       PointwiseComplexMultiply<<<gridsize,blocksize,0,stream>>>(cp1p,dc,cp1,nbin*nsub,nfft,idm,1.0/(float) nbin);
       PointwiseComplexMultiply<<<gridsize,blocksize,0,stream>>>(cp2p,dc,cp2,nbin*nsub,nfft,idm,1.0/(float) nbin);
       
-      // end of cp1p/cp2p needed
-
+      // When cp1/2p are no longer needed, start overlapping the data for the next iteration on a separate stream
       if (idm == ndm - 1) {
-        //checkCudaErrors(cudaEventRecord(events[2], stream));
-        //cudaStreamWaitEvent(streams[2], events[2], 0);
-
+        cudaEventRecord(events[2], stream);
+        cudaStreamWaitEvent(events[2], streams[numStreams], 0);
         blocksize.x=32; blocksize.y=32; blocksize.z=1;
         gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft/blocksize.y+1; gridsize.z=nsub/blocksize.z+1;
         padd_next_iteration<<<gridsize,blocksize,0,streams[numStreams]>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
-        checkCudaErrors(cudaEventRecord(events[1], streams[numStreams]));
+        cudaEventRecord(events[1], streams[numStreams]);
       }
       // Swap spectrum halves for small FFTs
       blocksize.x=32; blocksize.y=32; blocksize.z=1;
@@ -550,16 +549,12 @@ int main(int argc,char *argv[])
       // Perform FFTs
       checkCudaErrors(cufftExecC2C(ftc2cb,(cufftComplex *) cp1,(cufftComplex *) cp1,CUFFT_INVERSE));
       checkCudaErrors(cufftExecC2C(ftc2cb,(cufftComplex *) cp2,(cufftComplex *) cp2,CUFFT_INVERSE));
-      
-      if (idm == ndm - 1)
-        cudaEventRecord(events[2], stream);
+
       //cudaStreamWaitEvent(stream, dmWriteEvents[streamIdx][idm-1 > -1 ? idm-1 : 0], 0);
       // Detect data
       blocksize.x=32; blocksize.y=32; blocksize.z=1;
       gridsize.x=mbin/blocksize.x+1; gridsize.y=nchan/blocksize.y+1; gridsize.z=nfft/blocksize.z+1;
       transpose_unpadd_and_detect<<<gridsize,blocksize,0,stream>>>(cp1,cp2,mbin,nchan,nfft,nsub,noverlap/nchan,nread/nchan,dfbuf);
-      
-      // end of cp1/cp2 needed
       
       if (redig) {
         // Compute block sums for redigitization
@@ -597,9 +592,11 @@ int main(int argc,char *argv[])
 
       }
 
+      // Record when the final memcpy finishes to block disk writes
       cudaEventRecord(dmWriteEvents[streamIdx][idm], stream);
     }
 
+    // Wrtie results to disk, waiting for each DM's memcpy to finish first
     for (idm=0;idm<ndm;idm++) {
       if (redig) {
         write_to_disk_char(&(cbuf[streamIdx][idm][writeOffset*nsub/ndec]), &(outfile[idm]), writeSize, &(dmWriteEvents[streamIdx][idm]));
