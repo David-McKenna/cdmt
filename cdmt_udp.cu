@@ -18,7 +18,7 @@
 
 #define HEADERSIZE 4096
 #define DMCONSTANT 2.41e-10
-
+#define VERB 1
 
 // Struct for header information
 struct header {
@@ -75,6 +75,9 @@ void usage()
   printf("-f <FFTs per op> Number of FFTs to execute per cuFFT call [default: 128]\n");
   printf("-a               Disable redigitisation; output float32 [default: false]\n");
   printf("-c <num chan>    Channelisation Factor [default: 8]\n");
+  printf("-w               Print warnings about input parameter sizes [default: true]\n");
+  printf("-p <num>         Number of ports of data to process [default: 4]\n");
+  printf("-l <num>         Base port number to iterate from when determining rae file names [default for IE613: 16130]\n");
 
   return;
 }
@@ -100,7 +103,7 @@ int main(int argc,char *argv[])
   int bytes_read;
   long int ts_read=LONG_MAX,ts_skip=0;
   long int total_ts_read=0;
-  int part=0,device=0,nforward=128,redig=1,ports=4;
+  int part=0,device=0,nforward=128,redig=1,ports=4,baseport=16130,checkinputs=1;
   int arg=0;
   FILE **outfile;
 
@@ -108,7 +111,7 @@ int main(int argc,char *argv[])
 
   // Read options
   if (argc>1) {
-    while ((arg=getopt(argc,argv,"ac:p:f:d:D:ho:b:N:n:s:r:m:t:"))!=-1) {
+    while ((arg=getopt(argc,argv,"awc:p:f:d:D:ho:b:N:n:s:r:m:t:p:l:"))!=-1) {
       switch (arg) {
   
       case 'n':
@@ -159,6 +162,18 @@ int main(int argc,char *argv[])
   nchan=atoi(optarg);
   break;
 
+      case 'w':
+  checkinputs=0;
+  break;
+
+      case 'p':
+  ports=atoi(optarg);
+  break;
+
+      case 'l':
+  baseport=atoi(optarg);
+  break;
+
       case 'h':
   usage();
   return 0;
@@ -174,31 +189,39 @@ int main(int argc,char *argv[])
   udpfname=argv[optind];
 
   // Sanity checks to avoid voids in output filterbank
-  if (nbin % 8 != 0) {
-    fprintf(stderr, "ERROR: nbin must be disible by 8 (currently %d, remainder %d). Exiting.\n", nbin, nbin % 8);
-    exit(1);
-  }
-  if ( (nforward * (nbin-2*noverlap)) % 8 != 0 ) {
-    fprintf(stderr, "ERROR: Valid data length must be divisible by 8 (currently %d, remainer %d). Exiting.", nbin-2*noverlap, (nbin-2*noverlap) % 8);
-    exit(1);
+  if (checkinputs) 
+  {
+    if (nbin % nchan != 0) {
+      fprintf(stderr, "ERROR: nbin must be disible by nchan (%d) (currently %d, remainder %d). Exiting.\n", nchan, nbin, nbin % nchan);
+      exit(1);
+    }
+    if ((nforward * (nbin-2*noverlap)) % nchan != 0 ) {
+      fprintf(stderr, "ERROR: Valid data length must be divisible by nchan (%d) (currently %d, remainer %d). Exiting.", nchan, nbin-2*noverlap, (nbin-2*noverlap) % nchan);
+      exit(1);
+    }
+
+    if ((nforward * (nbin-2*noverlap) / nchan) % msum != 0) {
+      printf("%d\n", (nforward * (nbin-2*noverlap) / nchan) % msum);
+      fprintf(stderr, "ERROR: Interal sum cannot proceed; valid samples must be divisible by msum (%d) (currently %d, remainder %d).\n", msum, (nforward * (nbin-2*noverlap) / nchan), (nforward * (nbin-2*noverlap) / nchan) % msum);
+      exit(1);
+    }
+    
+    if ((nforward * (nbin-2*noverlap)) % 16 != 0) {
+      fprintf(stderr, "ERROR: Number of valid samples must be divisible by samples per packet (16) (currently %d, remainder %d). Exiting.\n", (nforward * (nbin-2*noverlap)), (nforward * (nbin-2*noverlap)) % 16);
+      exit(1);
+    }
   }
 
-  if ((nforward * (nbin-2*noverlap) / 8) % 1024 != 0) {
-    fprintf(stderr, "ERROR: Interal sum cannot proceed; valid samples must be divisible by 1024 (currently %d, remainder %d).\n", (nforward * (nbin-2*noverlap) / 8), (nforward * (nbin-2*noverlap) / 8) % 1024);
-    fprintf(stderr, "Consider using %d or %d as your forward FFT size next time. Exiting.\n", 64 * ((nforward * (nbin-2*noverlap) / 8) - (nforward * (nbin-2*noverlap) / 8) % 1024) / 1024 + 2 * noverlap,
-                                                                                   64 * ((nforward * (nbin-2*noverlap) / 8) + (1024  - (nforward * (nbin-2*noverlap) / 8) % 1024)) / 1024 + 2 * noverlap);
-    exit(1);
-  }
-  
 
   if (strcmp(sphdrfname, "") == 0) {
-    sprintf(sphdrfname, "%s.sigprochdr", udpfname);
+    fprintf(stderr, "ERROR: Sigproc header not provided. Exiting.\n");
+    exit(1);
   }
 
   FILE* inputFiles[4];
   int compressedInput = 0;
-  char tmpfname[1024] = "";
-  if (strstr(udpfname, "zst") != NULL) compressedInput = 1;
+  char tmpfname[msum] = "";
+  if (strstr(udpfname, ".zst") != NULL) compressedInput = 1;
 
 
  
@@ -206,17 +229,19 @@ int main(int argc,char *argv[])
   hdr = read_sigproc_header(sphdrfname, udpfname, ports);
 
   // Check that the bin size is sufficiently large
-  const double stg1 = (1.0 / 2.41e-4) *  abs(pow((double) hdr.fch1 + hdr.nsub * hdr.foff + hdr.foff *0.5,-2.0) - pow((double) hdr.fch1 + hdr.nsub * hdr.foff - hdr.foff *0.5, -2.0));
-  const int overlapCheck = (int) (stg1 * (dm_start + dm_step * ndm)/ hdr.tsamp);
-  if (overlapCheck > nbin) {
-    fprintf(stderr, "WARNING: The size of your FFT bin is too short for the given DMs and frequencies. Given bin size: %d, Suggested minimum bin size: %d\n", nbin, overlapCheck);
-  } else if (overlapCheck / nchan / 2 > noverlap) {
-    fprintf(stderr, "WARNING: The size of your FFT overlap is too short for the given maximum DM. Given overlap: %d, Suggested minimum overlap: %d.\n", noverlap, overlapCheck);
+  if (checkinputs)
+  {
+    const double stg1 = (1.0 / 2.41e-4) *  abs(pow((double) hdr.fch1 + hdr.nsub * hdr.foff + hdr.foff *0.5,-2.0) - pow((double) hdr.fch1 + hdr.nsub * hdr.foff - hdr.foff *0.5, -2.0)) * (dm_start + dm_step * ndm);
+    const int overlapCheck = (int) (stg1 / hdr.tsamp);
+    if (overlapCheck > nbin) {
+      fprintf(stderr, "WARNING: The size of your FFT bin is too short for the given DMs and frequencies. Given bin size: %d, Suggested minimum bin size: %d (maximum dispersion delay %f).\n", nbin, overlapCheck, stg1);
+    } else if (overlapCheck / 2 > noverlap) {
+      fprintf(stderr, "WARNING: The size of your FFT overlap is too short for the given maximum DM. Given overlap: %d, Suggested minimum overlap: %d (maximum dispersion delay %f).\n", noverlap, overlapCheck / 2, stg1);
+    }
   }
 
-
   for (int i = 0; i < 4; i++) {
-    sprintf(tmpfname, udpfname, i);
+    sprintf(tmpfname, udpfname, i + baseport);
     printf("Opening %s...\n", tmpfname);
 
     inputFiles[i] = fopen(tmpfname, "r");
@@ -225,7 +250,8 @@ int main(int argc,char *argv[])
       printf("Input file failed to open (null pointer)\n");
     }
 
-    strcpy(hdr.rawfname[i],tmpfname);
+    if (i == 0)
+      strcpy(hdr.rawfname[i],tmpfname);
   }
   // Read the number of subbands
   nsub=hdr.nsub;
@@ -247,10 +273,7 @@ int main(int argc,char *argv[])
   mbin=nbin/nchan; // nbin must be evenly divisible by 8
   mchan=nsub*nchan;
   msamp=nsamp/nchan; // nforward * nvalid must be divisble by 8
-  mblock=msamp/msum; // nforward * nvalid / 8 must be disible by 1024
-
-  long unsigned int bytesUsed = sizeof(cufftComplex) * nbin * nfft * nsub * 4 + sizeof(cufftComplex) * nbin *nsub * ndm + sizeof(float) * mblock * mchan * 2 + sizeof(char) * nsamp * nsub * 4 + sizeof(float) * nsamp * nsub + redig * msamp * mchan / ndec - (redig - 1) * 4 * msamp * mchan * ndec;
-  printf("We anticipate %ld GB (%ld bytes) to be allocated on the GPU (excluding cuFFT planning).\n", bytesUsed >> 30, bytesUsed);
+  mblock=msamp/msum; // nforward * nvalid / 8 must be disible by msum
 
 
   const long int packetGulp = nsamp / 16;
@@ -275,19 +298,20 @@ int main(int argc,char *argv[])
   checkCudaErrors(cudaSetDevice(device));
 
   // Generate streams for asyncrnous operations
-  int numStreams = 1;
+  int numStreams = 2;
   // Add an extra stream for the final padding operation
   cudaStream_t streams[numStreams+1];
   for (i = 0; i < numStreams+1; i++)
     checkCudaErrors(cudaStreamCreate(&(streams[i])));
 
   // Create 2 events; one which blocks execution (preventing new data reads) and the other waiting for compute to finish.
-  cudaEvent_t events[3];
+  int numEvents = 3;
+  cudaEvent_t events[numEvents];
   cudaEventCreateWithFlags(&(events[0]), cudaEventBlockingSync & cudaEventDisableTiming);
   cudaEventCreateWithFlags(&(events[1]), cudaEventDisableTiming);
-  cudaEventCreateWithFlags(&(events[2]), cudaEventDisableTiming);
+  cudaEventCreateWithFlags(&(events[2]), cudaEventBlockingSync & cudaEventDisableTiming);
 
-  cudaEvent_t dmWriteEvents[2][ndm];
+  cudaEvent_t dmWriteEvents[numStreams][ndm];
   for (i =0; i < ndm; i++)
     for (j = 0; j < numStreams; j++)
       cudaEventCreateWithFlags(&(dmWriteEvents[j][i]), cudaEventBlockingSync & cudaEventDisableTiming);
@@ -322,7 +346,13 @@ int main(int argc,char *argv[])
   // Get the maximum size needed for the FFT operations
 
   size_t minfftSize = cfSize > cbSize ? cfSize : cbSize;
-  printf("Allocated %ldMB for cuFFT work (instead of %ldMB)\n", minfftSize >> 20, (cfSize + cbSize) >> 20);
+  if (VERB) printf("Allocated %ldMB for cuFFT work (saving %ldMB)\n", minfftSize >> 20, (cfSize + cbSize - minfftSize) >> 20);
+
+
+  long unsigned int bytesUsed = sizeof(cufftComplex) * nbin * nfft * nsub * 4 + sizeof(cufftComplex) * nbin *nsub * ndm + sizeof(float) * mblock * mchan * 2 + sizeof(char) * nsamp * nsub * 4 + sizeof(float) * nsamp * nsub + redig * msamp * mchan / ndec - (redig - 1) * 4 * msamp * mchan * ndec;
+  if (VERB) printf("We anticipate %ld MB (%ld GB) to be allocated on the GPU (%ld MB for cuFFT planning).\n", (bytesUsed + minfftSize) >> 20, (bytesUsed + minfftSize) >> 30, minfftSize >> 20);
+
+
   // Allocate the maxmimum memory needed
   void* cufftWorkArea;
   checkCudaErrors(cudaMalloc((void**) &cufftWorkArea, (size_t) minfftSize));
@@ -432,18 +462,43 @@ int main(int argc,char *argv[])
   double timeInSeconds = 0.0;
   nread = INT_MAX;
 
+  // Init a lock
+  omp_lock_t readLock, moveLock, diskLock;
+  omp_init_lock(&readLock);
+  omp_init_lock(&moveLock);
+  omp_init_lock(&diskLock);
 
   // Skip the first noverlap samples as they are 0'd
   int writeOffset = 2 * noverlap;
-  int writeSize;
+  int writeSize, breakVar;
+  breakVar = 0;
+  #pragma omp parallel for ordered num_threads(2) shared(nread,total_ts_read,timeInSeconds,breakVar,reader,udpbuf,dudpbuf) private(writeSize,writeOffset,startclock,nread_tmp,idm,i) schedule(static,1)
+  for (int iblock=0;iblock < 100;iblock++) {
 
-  for (int iblock=0;;iblock++) {
+    printf("%d, %d start\n", iblock, omp_get_thread_num());
+    if (breakVar) {
+      continue;
+    }
 
+    if (iblock != 0)
+      writeOffset = 0;
+    else
+      writeOffset = 2 * noverlap;
     // Ge tthe current stream from block iteration
     int streamIdx = iblock % numStreams;
     cudaStream_t stream = streams[streamIdx];
-    // Read block
-    //cudaEventSynchronize(events[0]);
+
+    printf("preord %d\n", iblock);
+
+    #pragma omp ordered
+    omp_set_lock(&moveLock);
+
+    printf("ordered %d\n", iblock);
+    cudaEventSynchronize(events[0]);
+    printf("ordered %d\n", iblock);
+
+    printf("%d, %d\n", iblock, streamIdx);
+
     startclock=clock();
     nread_tmp = reshapeRawUdp(reader);
     if (nread > nread_tmp) {
@@ -451,23 +506,29 @@ int main(int argc,char *argv[])
     }
 
     writeSize = (nread-writeOffset)*nsub/ndec;
+    printf("%d read comp %d\n", iblock, writeSize);
+
     // Count up the total bytes read
     total_ts_read += nread;
     printf("Block: %d: Read %ld MB in %.2f s\n",iblock,sizeof(char)*nread*nsub*4/(1<<20),(float) (clock()-startclock)/CLOCKS_PER_SEC);
 
     if (nread==0) {
       printf("No data read from last file; assuming EOF, finishng up.\n");
-      break;
+      #pragma omp atomic write
+      breakVar = 1;
     } else if (iblock != 0 && nread < nread_tmp) {
       printf("Received less data than expected; we may have parsed out of order data or we are nearing the EOF.\n");
     }
 
-    //cudaStreamWaitEvent(stream, events[1], 0);
     // Copy buffers to device
+    cudaStreamWaitEvent(stream, events[1], 0);
+
+    omp_set_lock(&readLock);
     startclock=clock();
     for (i=0;i<4;i++)
       checkCudaErrors(cudaMemcpyAsync(dudpbuf[i],udpbuf[i],sizeof(char)*nread*nsub,cudaMemcpyHostToDevice,stream));
-
+    cudaEventRecord(events[0], stream);
+    omp_unset_lock(&moveLock);
     //checkCudaErrors(cudaEventRecord(events[0], stream));
     // Unpack data and padd data
     blocksize.x=32; blocksize.y=32; blocksize.z=1;
@@ -478,9 +539,11 @@ int main(int argc,char *argv[])
       unpack_and_padd_first_iteration<<<gridsize,blocksize,0,stream>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);;
     }
 
+
+    if (breakVar) continue;
     // Perform FFTs
+    cudaEventSynchronize(events[2]);
     cufftSetStream(ftc2cf, stream);
-    cufftSetStream(ftc2cb, stream);
     checkCudaErrors(cufftExecC2C(ftc2cf,(cufftComplex *) cp1p,(cufftComplex *) cp1p,CUFFT_FORWARD));
     checkCudaErrors(cufftExecC2C(ftc2cf,(cufftComplex *) cp2p,(cufftComplex *) cp2p,CUFFT_FORWARD));
 
@@ -489,6 +552,7 @@ int main(int argc,char *argv[])
     gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft*nsub/blocksize.y+1; gridsize.z=1;
     swap_spectrum_halves<<<gridsize,blocksize,0,stream>>>(cp1p,cp2p,nbin,nfft*nsub);
 
+    cufftSetStream(ftc2cb, stream);
     // Loop over dms
     for (idm=0;idm<ndm;idm++) {
 
@@ -508,6 +572,8 @@ int main(int argc,char *argv[])
         gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft/blocksize.y+1; gridsize.z=nsub/blocksize.z+1;
         padd_next_iteration<<<gridsize,blocksize,0,streams[numStreams]>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
         checkCudaErrors(cudaEventRecord(events[1], streams[numStreams]));
+        printf("unlock\n");
+        omp_unset_lock(&readLock);
       }
       // Swap spectrum halves for small FFTs
       blocksize.x=32; blocksize.y=32; blocksize.z=1;
@@ -518,6 +584,8 @@ int main(int argc,char *argv[])
       checkCudaErrors(cufftExecC2C(ftc2cb,(cufftComplex *) cp1,(cufftComplex *) cp1,CUFFT_INVERSE));
       checkCudaErrors(cufftExecC2C(ftc2cb,(cufftComplex *) cp2,(cufftComplex *) cp2,CUFFT_INVERSE));
       
+      if (idm == ndm - 1)
+        cudaEventRecord(events[2], stream);
       //cudaStreamWaitEvent(stream, dmWriteEvents[streamIdx][idm-1 > -1 ? idm-1 : 0], 0);
       // Detect data
       blocksize.x=32; blocksize.y=32; blocksize.z=1;
@@ -548,7 +616,6 @@ int main(int argc,char *argv[])
         // Copy buffer to host
         checkCudaErrors(cudaMemcpyAsync(cbuf[streamIdx][idm],dcbuf,sizeof(unsigned char)*msamp*mchan/ndec,cudaMemcpyDeviceToHost,stream));
 
-        cudaEventRecord(dmWriteEvents[streamIdx][idm], stream);
       } else {
         if (ndec==1) {
           checkCudaErrors(cudaMemcpyAsync(cbuff[streamIdx][idm], dfbuf,sizeof(float)*msamp*mchan,cudaMemcpyDeviceToHost,stream));
@@ -559,11 +626,15 @@ int main(int argc,char *argv[])
           decimate<<<gridsize,blocksize,0,stream>>>(dfbuf,ndec,mchan,mblock,msum,dcbuff);
           checkCudaErrors(cudaMemcpyAsync(cbuff[streamIdx][idm],dcbuff,sizeof(float)*msamp*mchan/ndec,cudaMemcpyDeviceToHost,stream));
         }
-        //cudaEventRecord(dmWriteEvents[streamIdx][idm], stream);
+        
 
       }
+
+      cudaEventRecord(dmWriteEvents[streamIdx][idm], stream);
     }
 
+    printf("write %d\n", iblock);
+    omp_set_lock(&diskLock);
     for (idm=0;idm<ndm;idm++) {
       if (redig) {
         write_to_disk_char(&(cbuf[streamIdx][idm][writeOffset*nsub/ndec]), &(outfile[idm]), writeSize, &(dmWriteEvents[streamIdx][idm]));
@@ -571,13 +642,16 @@ int main(int argc,char *argv[])
         write_to_disk_float(&(cbuff[streamIdx][idm][writeOffset*nsub/ndec]), &(outfile[idm]), writeSize, &(dmWriteEvents[streamIdx][idm]));
       }
     }
+    omp_unset_lock(&diskLock);
 
     printf("Processed %d DMs in %.2f s\n",ndm,(float) (clock()-startclock)/CLOCKS_PER_SEC);
+    #pragma omp atomic update
     timeInSeconds += (double) (nread - writeOffset) * timeOffset;
     printf("Current data processed: %02ld:%02ld:%05.2lf (%1.2lfs)\n\n", (long int) (timeInSeconds / 3600.0), (long int) ((fmod(timeInSeconds, 3600.0)) / 60.0), fmod(timeInSeconds, 60.0), timeInSeconds);
     // Exit when we pass the read length limit
     if (total_ts_read > ts_read) {
-      break;
+      #pragma omp atomic write
+      breakVar = 1;
     }
 
     if (iblock == 0) {
@@ -586,6 +660,9 @@ int main(int argc,char *argv[])
 
   }
 
+  omp_destroy_lock(&readLock);
+  omp_destroy_lock(&diskLock);
+  omp_destroy_lock(&moveLock);
 
   //omp_destroy_lock(&readLock);
   // Close files
@@ -620,6 +697,7 @@ int main(int argc,char *argv[])
     if (ndec > 1) cudaFree(dcbuff);
   }
 
+  cudaFree(cufftWorkArea);
   cudaFree(dfbuf);
   cudaFree(cp1);
   cudaFree(cp2);
@@ -632,13 +710,13 @@ int main(int argc,char *argv[])
   cufftDestroy(ftc2cf);
   cufftDestroy(ftc2cb);
 
-  for(i = 0; i < 3; i++)
+  for(i = 0; i < numStreams + 1; i++)
     cudaStreamDestroy(streams[i]);
-  for(i = 0; i < 2; i++)
+  for(i = 0; i < numEvents; i++)
     cudaEventDestroy(events[i]);
 
   for (i = 0; i < ndm; i++)
-    for (j =0; j < 2; j++)
+    for (j =0; j < numStreams; j++)
       cudaEventDestroy(dmWriteEvents[j][i]);
 
   return 0;
