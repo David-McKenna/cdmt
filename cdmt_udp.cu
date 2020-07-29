@@ -298,7 +298,7 @@ int main(int argc,char *argv[])
   checkCudaErrors(cudaSetDevice(device));
 
   // Generate streams for asyncrnous operations
-  int numStreams = 2;
+  int numStreams = 1;
   // Add an extra stream for the final padding operation
   cudaStream_t streams[numStreams+1];
   for (i = 0; i < numStreams+1; i++)
@@ -462,42 +462,16 @@ int main(int argc,char *argv[])
   double timeInSeconds = 0.0;
   nread = INT_MAX;
 
-  // Init a lock
-  omp_lock_t readLock, moveLock, diskLock;
-  omp_init_lock(&readLock);
-  omp_init_lock(&moveLock);
-  omp_init_lock(&diskLock);
-
   // Skip the first noverlap samples as they are 0'd
   int writeOffset = 2 * noverlap;
-  int writeSize, breakVar;
-  breakVar = 0;
-  #pragma omp parallel for ordered num_threads(2) shared(nread,total_ts_read,timeInSeconds,breakVar,reader,udpbuf,dudpbuf) private(writeSize,writeOffset,startclock,nread_tmp,idm,i) schedule(static,1)
-  for (int iblock=0;iblock < 100;iblock++) {
+  int writeSize;
 
-    printf("%d, %d start\n", iblock, omp_get_thread_num());
-    if (breakVar) {
-      continue;
-    }
+  for (int iblock=0;;iblock++) {
 
-    if (iblock != 0)
-      writeOffset = 0;
-    else
-      writeOffset = 2 * noverlap;
-    // Ge tthe current stream from block iteration
+    // Get the current stream from block iteration
     int streamIdx = iblock % numStreams;
     cudaStream_t stream = streams[streamIdx];
-
-    printf("preord %d\n", iblock);
-
-    #pragma omp ordered
-    omp_set_lock(&moveLock);
-
-    printf("ordered %d\n", iblock);
     cudaEventSynchronize(events[0]);
-    printf("ordered %d\n", iblock);
-
-    printf("%d, %d\n", iblock, streamIdx);
 
     startclock=clock();
     nread_tmp = reshapeRawUdp(reader);
@@ -506,7 +480,6 @@ int main(int argc,char *argv[])
     }
 
     writeSize = (nread-writeOffset)*nsub/ndec;
-    printf("%d read comp %d\n", iblock, writeSize);
 
     // Count up the total bytes read
     total_ts_read += nread;
@@ -514,8 +487,7 @@ int main(int argc,char *argv[])
 
     if (nread==0) {
       printf("No data read from last file; assuming EOF, finishng up.\n");
-      #pragma omp atomic write
-      breakVar = 1;
+      break;
     } else if (iblock != 0 && nread < nread_tmp) {
       printf("Received less data than expected; we may have parsed out of order data or we are nearing the EOF.\n");
     }
@@ -523,12 +495,11 @@ int main(int argc,char *argv[])
     // Copy buffers to device
     cudaStreamWaitEvent(stream, events[1], 0);
 
-    omp_set_lock(&readLock);
     startclock=clock();
     for (i=0;i<4;i++)
       checkCudaErrors(cudaMemcpyAsync(dudpbuf[i],udpbuf[i],sizeof(char)*nread*nsub,cudaMemcpyHostToDevice,stream));
     cudaEventRecord(events[0], stream);
-    omp_unset_lock(&moveLock);
+
     //checkCudaErrors(cudaEventRecord(events[0], stream));
     // Unpack data and padd data
     blocksize.x=32; blocksize.y=32; blocksize.z=1;
@@ -539,8 +510,6 @@ int main(int argc,char *argv[])
       unpack_and_padd_first_iteration<<<gridsize,blocksize,0,stream>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);;
     }
 
-
-    if (breakVar) continue;
     // Perform FFTs
     cudaEventSynchronize(events[2]);
     cufftSetStream(ftc2cf, stream);
@@ -572,8 +541,6 @@ int main(int argc,char *argv[])
         gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft/blocksize.y+1; gridsize.z=nsub/blocksize.z+1;
         padd_next_iteration<<<gridsize,blocksize,0,streams[numStreams]>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
         checkCudaErrors(cudaEventRecord(events[1], streams[numStreams]));
-        printf("unlock\n");
-        omp_unset_lock(&readLock);
       }
       // Swap spectrum halves for small FFTs
       blocksize.x=32; blocksize.y=32; blocksize.z=1;
@@ -633,8 +600,6 @@ int main(int argc,char *argv[])
       cudaEventRecord(dmWriteEvents[streamIdx][idm], stream);
     }
 
-    printf("write %d\n", iblock);
-    omp_set_lock(&diskLock);
     for (idm=0;idm<ndm;idm++) {
       if (redig) {
         write_to_disk_char(&(cbuf[streamIdx][idm][writeOffset*nsub/ndec]), &(outfile[idm]), writeSize, &(dmWriteEvents[streamIdx][idm]));
@@ -642,16 +607,13 @@ int main(int argc,char *argv[])
         write_to_disk_float(&(cbuff[streamIdx][idm][writeOffset*nsub/ndec]), &(outfile[idm]), writeSize, &(dmWriteEvents[streamIdx][idm]));
       }
     }
-    omp_unset_lock(&diskLock);
 
     printf("Processed %d DMs in %.2f s\n",ndm,(float) (clock()-startclock)/CLOCKS_PER_SEC);
-    #pragma omp atomic update
     timeInSeconds += (double) (nread - writeOffset) * timeOffset;
     printf("Current data processed: %02ld:%02ld:%05.2lf (%1.2lfs)\n\n", (long int) (timeInSeconds / 3600.0), (long int) ((fmod(timeInSeconds, 3600.0)) / 60.0), fmod(timeInSeconds, 60.0), timeInSeconds);
     // Exit when we pass the read length limit
     if (total_ts_read > ts_read) {
-      #pragma omp atomic write
-      breakVar = 1;
+      break;
     }
 
     if (iblock == 0) {
@@ -659,10 +621,6 @@ int main(int argc,char *argv[])
     }
 
   }
-
-  omp_destroy_lock(&readLock);
-  omp_destroy_lock(&diskLock);
-  omp_destroy_lock(&moveLock);
 
   //omp_destroy_lock(&readLock);
   // Close files
