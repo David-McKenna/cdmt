@@ -466,7 +466,8 @@ int main(int argc,char *argv[])
   int writeOffset = 2 * noverlap;
   int writeSize;
 
-  int streamIdx = iblock % numStreams;
+  //int streamIdx = iblock % numStreams;
+  int streamIdx = 0;
   cudaStream_t stream = streams[streamIdx];
   for (int iblock=0;;iblock++) {
 
@@ -512,7 +513,7 @@ int main(int argc,char *argv[])
     }
 
     // Perform FFTs
-    cudaStreamWaitEvent(stream, events[2], 0;)
+    cudaStreamWaitEvent(stream, events[2], 0);
     cufftSetStream(ftc2cf, stream);
     checkCudaErrors(cufftExecC2C(ftc2cf,(cufftComplex *) cp1p,(cufftComplex *) cp1p,CUFFT_FORWARD));
     checkCudaErrors(cufftExecC2C(ftc2cf,(cufftComplex *) cp2p,(cufftComplex *) cp2p,CUFFT_FORWARD));
@@ -535,7 +536,7 @@ int main(int argc,char *argv[])
       // When cp1/2p are no longer needed, start overlapping the data for the next iteration on a separate stream
       if (idm == ndm - 1) {
         cudaEventRecord(events[2], stream);
-        cudaStreamWaitEvent(events[2], streams[numStreams], 0);
+        cudaStreamWaitEvent(streams[numStreams], events[2], 0);
         blocksize.x=32; blocksize.y=32; blocksize.z=1;
         gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft/blocksize.y+1; gridsize.z=nsub/blocksize.z+1;
         padd_next_iteration<<<gridsize,blocksize,0,streams[numStreams]>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
