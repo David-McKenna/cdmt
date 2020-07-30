@@ -332,14 +332,14 @@ int main(int argc,char *argv[])
   idist=nbin;  odist=nbin;  iembed=nbin;  oembed=nbin;  istride=1;  ostride=1;
   checkCudaErrors(cufftPlanMany(&ftc2cf,1,&nbin,&iembed,istride,idist,&oembed,ostride,odist,CUFFT_C2C,nfft*nsub));
   checkCudaErrors(cufftGetSizeMany(ftc2cf, 1,&nbin,&iembed,istride,idist,&oembed,ostride,odist,CUFFT_C2C,nfft*nsub, &cfSize));
-  cufftSetStream(ftc2cf,streams[0]);
+  //cufftSetStream(ftc2cf,streams[0]);
   // Total malloc (FFT forward)
 
   // Generate FFT plan (batch in-place backward FFT)
   idist=mbin;  odist=mbin;  iembed=mbin;  oembed=mbin;  istride=1;  ostride=1;
   checkCudaErrors(cufftPlanMany(&ftc2cb,1,&mbin,&iembed,istride,idist,&oembed,ostride,odist,CUFFT_C2C,nchan*nfft*nsub));
   checkCudaErrors(cufftGetSizeMany(ftc2cb, 1,&mbin,&iembed,istride,idist,&oembed,ostride,odist,CUFFT_C2C,nchan*nfft*nsub,&cbSize));
-  cufftSetStream(ftc2cb,streams[0]);
+  //cufftSetStream(ftc2cb,streams[0]);
   cudaDeviceSynchronize();
   // Total malloc (backward)
 
