@@ -4,3 +4,4 @@
 [submodule "udpPacketManager"]
 	path = udpPacketManager
 	url = https://github.com/David-McKenna/udpPacketManager
+	branch = master
