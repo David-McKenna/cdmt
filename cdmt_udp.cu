@@ -365,23 +365,6 @@ int main(int argc,char *argv[])
   checkCudaErrors(cufftGetSizeMany(ftc2cb, 1,&mbin,&iembed,istride,idist,&oembed,ostride,odist,CUFFT_C2C,nchan*nfft*nsub,&cbSize));
   //cufftSetStream(ftc2cb,streams[0]);
   cudaDeviceSynchronize();
-  // Total malloc (backward)
-
-  // Get the maximum size needed for the FFT operations
-
-  //size_t minfftSize = cfSize > cbSize ? cfSize : cbSize;
-  //if (VERB) printf("Allocated %ldMB for cuFFT work (saving %ldMB)\n", minfftSize >> 20, (cfSize + cbSize - minfftSize) >> 20);
-  //long unsigned int bytesUsed = sizeof(cufftComplex) * nbin * nfft * nsub * 4 + sizeof(cufftComplex) * nbin *nsub * ndm + sizeof(float) * mblock * mchan * 2 + sizeof(char) * nsamp * nsub * 4 + sizeof(float) * nsamp * nsub + redig * msamp * mchan / ndec - (redig - 1) * 4 * msamp * mchan * ndec;
-  //if (VERB) printf("We anticipate %ld MB (%ld GB) to be allocated on the GPU (%ld MB for cuFFT planning).\n", (bytesUsed + minfftSize) >> 20, (bytesUsed + minfftSize) >> 30, minfftSize >> 20);
-
-
-  // Allocate the maxmimum memory needed
-  void* cufftWorkArea;
-  checkCudaErrors(cudaMalloc((void**) &cufftWorkArea, (size_t) minfftSize));
-  // Set the cuFFT handles to use this area
-  cufftSetWorkArea(ftc2cf, cufftWorkArea);
-  cufftSetWorkArea(ftc2cb, cufftWorkArea);
-
 
   // Get the maximum size needed for the FFT operations (they should be the same, check for safety)
   size_t minfftSize = cfSize > cbSize ? cfSize : cbSize;
