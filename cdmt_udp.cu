@@ -16,6 +16,18 @@
 #include "udpPacketManager/lofar_udp_reader.h"
 #include "udpPacketManager/lofar_udp_misc.h"
 
+// Timing macro
+#ifndef __LOFAR_UDP_TICKTOCK_MACRO
+#define __LOFAR_UDP_TICKTOCK_MACRO
+// XOPEN -> strptime requirement
+#define __USE_XOPEN
+#include <time.h>
+
+#define CLICK(clock) clock_gettime(CLOCK_MONOTONIC_RAW, &clock);
+#define TICKTOCK(tick, tock) ((double) (tock.tv_nsec - tick.tv_nsec) / 1000000000.0) + (tock.tv_sec - tick.tv_sec)
+#endif
+
+
 #define HEADERSIZE 4096
 #define DMCONSTANT 2.41e-10
 #define VERB 1
@@ -109,6 +121,7 @@ int main(int argc,char *argv[])
   int part=0,device=0,nforward=128,redig=1,ports=4,baseport=16130,checkinputs=1;
   int arg=0;
   FILE **outfile;
+  struct timespec tick, tick0, tock, tock0;
 
   lofar_udp_reader *reader;
 
@@ -481,24 +494,25 @@ int main(int argc,char *argv[])
   //int streamIdx = iblock % numStreams;
   int streamIdx = 0;
   cudaStream_t stream = streams[streamIdx];
+  CLICK(tick);
   for (int iblock=0;;iblock++) {
 
     // Hold the host execution until we can confirm the async memory transfer for the raw data has finished
     cudaEventSynchronize(events[0]);
 
     // Read in the next block
-    startclock=clock();
+    CLICK(tick0);
     nread_tmp = reshapeRawUdp(reader);
     if (nread > nread_tmp) {
       nread = nread_tmp;
     }
-
+    CLICK(tock0);
     // Determine the output length
     writeSize = (nread-writeOffset)*nsub/ndec;
 
     // Count up the total bytes read and calculate the read time
     total_ts_read += nread;
-    printf("Block: %d: Read %ld MB in %.2f s\n",iblock,sizeof(char)*nread*nsub*4/(1<<20),(float) (clock()-startclock)/CLOCKS_PER_SEC);
+    printf("Block: %d: Read %ld MB in %.2f s\n",iblock,sizeof(char)*nread*nsub*4/(1<<20), TICKTOCK(tick0, tock0));
 
     // Sanity check the read data size
     if (nread==0) {
@@ -510,7 +524,7 @@ int main(int argc,char *argv[])
 
     // Copy buffers to device, waiting for the previous overlap operation to finish first
     cudaStreamWaitEvent(stream, events[1], 0);
-    startclock=clock();
+
     for (i=0;i<4;i++)
       checkCudaErrors(cudaMemcpyAsync(dudpbuf[i],udpbuf[i],sizeof(char)*nread*nsub,cudaMemcpyHostToDevice,stream));
     cudaEventRecord(events[0], stream);
@@ -619,9 +633,11 @@ int main(int argc,char *argv[])
       }
     }
 
-    printf("Processed %d DMs in %.2f s\n",ndm,(float) (clock()-startclock)/CLOCKS_PER_SEC);
+
+    CLICK(tock);
+    printf("Processed %d DMs in %.2f s\n",ndm, TICKTOCK(tick0, tock) - TICKTOCK(tick0, tock0));
     timeInSeconds += (double) (nread - writeOffset) * timeOffset;
-    printf("Current data processed: %02ld:%02ld:%05.2lf (%1.2lfs)\n\n", (long int) (timeInSeconds / 3600.0), (long int) ((fmod(timeInSeconds, 3600.0)) / 60.0), fmod(timeInSeconds, 60.0), timeInSeconds);
+    printf("Current data processed: %02ld:%02ld:%05.2lf (%1.2lfs) in %lf seconds (%f/s)\n\n", (long int) (timeInSeconds / 3600.0), (long int) ((fmod(timeInSeconds, 3600.0)) / 60.0), fmod(timeInSeconds, 60.0), timeInSeconds, TICKTICK(tick0, tock), timeInSeconds / TICKTICK(tick, tock) );
     // Exit when we pass the read length limit
     if (total_ts_read > ts_read) {
       break;
@@ -632,6 +648,9 @@ int main(int argc,char *argv[])
     }
 
   }
+
+  CLICK(tock);
+  printf("Finished processing %lfs of data in %fs (%lf/s). Cleaning up...\n", timeInSeconds, TICKTICK(tick, tock), timeInSeconds / TICKTICK(tick, tock));
 
   //omp_destroy_lock(&readLock);
   // Close files
