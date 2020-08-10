@@ -120,7 +120,7 @@ int main(int argc,char *argv[])
   int part=0,device=0,nforward=128,redig=1,ports=4,baseport=16130,checkinputs=1;
   int arg=0;
   FILE **outfile;
-  struct timespec tick, tick0, tock, tock0;
+  struct timespec tick, tick0, tick1, tock, tock0;
 
   lofar_udp_reader *reader;
 
@@ -524,6 +524,7 @@ int main(int argc,char *argv[])
     // Copy buffers to device, waiting for the previous overlap operation to finish first
     cudaStreamWaitEvent(stream, events[1], 0);
 
+    CLICK(tick1);
     for (i=0;i<4;i++)
       checkCudaErrors(cudaMemcpyAsync(dudpbuf[i],udpbuf[i],sizeof(char)*nread*nsub,cudaMemcpyHostToDevice,stream));
     cudaEventRecord(events[0], stream);
@@ -634,9 +635,9 @@ int main(int argc,char *argv[])
 
 
     CLICK(tock);
-    printf("Processed %d DMs in %.2f s\n",ndm, TICKTOCK(tick0, tock) - TICKTOCK(tick0, tock0));
+    printf("Processed %d DMs in %.2f s\n",ndm, TICKTOCK(tick1, tock));
     timeInSeconds += (double) (nread - writeOffset) * timeOffset;
-    printf("Current data processed: %02ld:%02ld:%05.2lf (%1.2lfs) in %lf seconds (%lf/s)\n\n", (long int) (timeInSeconds / 3600.0), (long int) ((fmod(timeInSeconds, 3600.0)) / 60.0), fmod(timeInSeconds, 60.0), timeInSeconds, TICKTOCK(tick0, tock), timeInSeconds / TICKTOCK(tick, tock) );
+    printf("Current data processed: %02ld:%02ld:%05.2lf (%1.2lfs) in %1.2lf seconds (%1.2lf/s)\n\n", (long int) (timeInSeconds / 3600.0), (long int) ((fmod(timeInSeconds, 3600.0)) / 60.0), fmod(timeInSeconds, 60.0), timeInSeconds, TICKTOCK(tick0, tock), timeInSeconds / (double) TICKTOCK(tick, tock));
     // Exit when we pass the read length limit
     if (total_ts_read > ts_read) {
       break;
