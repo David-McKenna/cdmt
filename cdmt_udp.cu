@@ -650,7 +650,7 @@ int main(int argc,char *argv[])
   }
 
   CLICK(tock);
-  printf("Finished processing %lfs of data in %fs (%lf/s). Cleaning up...\n", timeInSeconds, TICKTICK(tick, tock), timeInSeconds / TICKTICK(tick, tock));
+  printf("Finished processing %lfs of data in %fs (%lf/s). Cleaning up...\n", timeInSeconds, TICKTOCK(tick, tock), timeInSeconds / TICKTOCK(tick, tock));
 
   //omp_destroy_lock(&readLock);
   // Close files
