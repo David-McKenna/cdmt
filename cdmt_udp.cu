@@ -51,6 +51,7 @@ void write_to_disk_float(float* outputArray, FILE** outputFile, int nsamples, cu
 void write_to_disk_char(unsigned char* outputArray, FILE** outputFile, int nsamples, cudaEvent_t* waitEvent);
 void write_filterbank_header(struct header h,FILE *file);
 int reshapeRawUdp(lofar_udp_reader *reader);
+long  __inline__ beamformed_packno(unsigned int timestamp, unsigned int sequence);
 
 // External prototypes from udpPacketManager
 extern "C"
@@ -58,7 +59,6 @@ extern "C"
   int lofar_udp_reader_step(lofar_udp_reader *reader);
   lofar_udp_reader* lofar_udp_meta_file_reader_setup(FILE **inputFiles, const int numPorts, const int replayDroppedPackets, const int processingMode, const int verbose, const long packetsPerIteration, const long startingPacket, const long packetsReadMax, const int compressedReader);
   int lofar_udp_file_reader_reuse(lofar_udp_reader *reader, const long startingPacket, const long packetsReadMax);
-  long  __inline__ beamformed_packno(unsigned int timestamp, unsigned int sequence);
 }
 
 // Usage
