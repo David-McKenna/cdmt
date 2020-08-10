@@ -636,7 +636,7 @@ int main(int argc,char *argv[])
     CLICK(tock);
     printf("Processed %d DMs in %.2f s\n",ndm, TICKTOCK(tick0, tock) - TICKTOCK(tick0, tock0));
     timeInSeconds += (double) (nread - writeOffset) * timeOffset;
-    printf("Current data processed: %02ld:%02ld:%05.2lf (%1.2lfs) in %lf seconds (%f/s)\n\n", (long int) (timeInSeconds / 3600.0), (long int) ((fmod(timeInSeconds, 3600.0)) / 60.0), fmod(timeInSeconds, 60.0), timeInSeconds, TICKTOCK(tick0, tock), timeInSeconds / TICKTOCK(tick, tock) );
+    printf("Current data processed: %02ld:%02ld:%05.2lf (%1.2lfs) in %lf seconds (%lf/s)\n\n", (long int) (timeInSeconds / 3600.0), (long int) ((fmod(timeInSeconds, 3600.0)) / 60.0), fmod(timeInSeconds, 60.0), timeInSeconds, TICKTOCK(tick0, tock), timeInSeconds / TICKTOCK(tick, tock) );
     // Exit when we pass the read length limit
     if (total_ts_read > ts_read) {
       break;
