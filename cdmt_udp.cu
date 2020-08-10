@@ -22,7 +22,7 @@
 
 // Struct for header information
 struct header {
-  int nchan,nbit=0,nsub,tel=11;
+  int nchan,nbit=0,nsub,tel=11,mach=11;
   double tstart,tsamp,fch1,foff,fcen,bwchan;
   double src_raj,src_dej;
   char source_name[80];
@@ -30,7 +30,7 @@ struct header {
 };
 
 
-
+// Prototypes
 struct header read_sigproc_header(char *fname, char *dataname, int ports);
 void get_channel_chirp(double fcen,double bw,float dm,int nchan,int nbin,int nsub,cufftComplex *c);
 __global__ void transpose_unpadd_and_detect(cufftComplex *cp1,cufftComplex *cp2,int nbin,int nchan,int nfft,int nsub,int noverlap,int nsamp,float *fbuf);
@@ -51,13 +51,16 @@ void write_to_disk_float(float* outputArray, FILE** outputFile, int nsamples, cu
 void write_to_disk_char(unsigned char* outputArray, FILE** outputFile, int nsamples, cudaEvent_t* waitEvent);
 void write_filterbank_header(struct header h,FILE *file);
 int reshapeRawUdp(lofar_udp_reader *reader);
-long  __inline__ beamformed_packno(unsigned int timestamp, unsigned int sequence);
 
-extern "C"  {
+// External prototypes from udpPacketManager
+extern "C"
+{
   int lofar_udp_reader_step(lofar_udp_reader *reader);
   lofar_udp_reader* lofar_udp_meta_file_reader_setup(FILE **inputFiles, const int numPorts, const int replayDroppedPackets, const int processingMode, const int verbose, const long packetsPerIteration, const long startingPacket, const long packetsReadMax, const int compressedReader);
   int lofar_udp_file_reader_reuse(lofar_udp_reader *reader, const long startingPacket, const long packetsReadMax);
+  long  __inline__ beamformed_packno(unsigned int timestamp, unsigned int sequence);
 }
+
 // Usage
 void usage()
 {
@@ -69,15 +72,15 @@ void usage()
   printf("-o <outputname>           Output filename [default: cdmt]\n");
   printf("-N <forward FFT size>     Forward FFT size [integer, default: 65536]\n");
   printf("-n <overlap region>       Overlap region [integer, default: 2048]\n");
-  printf("-s <packets>       Number of packets to skip in the filterbank before stating processing [integer, default: 0]\n");
-  printf("-r <packets>       Number of packets to read in total from the -s offset [integer, default: length of file]\n");
-  printf("-m <sigproc header location>  Sigproc header to read metadata from [default: fil prefix.sigprochdr]\n");
+  printf("-s <packets>     Number of packets to skip in the filterbank before stating processing [integer, default: 0]\n");
+  printf("-r <packets>     Number of packets to read in total from the -s offset [integer, default: length of file]\n");
+  printf("-m <hdr loc>     Sigproc header to read metadata from [default: fil prefix.sigprochdr]\n");
   printf("-f <FFTs per op> Number of FFTs to execute per cuFFT call [default: 128]\n");
   printf("-a               Disable redigitisation; output float32 [default: false]\n");
   printf("-c <num chan>    Channelisation Factor [default: 8]\n");
   printf("-w               Print warnings about input parameter sizes [default: true]\n");
   printf("-p <num>         Number of ports of data to process [default: 4]\n");
-  printf("-l <num>         Base port number to iterate from when determining rae file names [default for IE613: 16130]\n");
+  printf("-l <num>         Base port number to iterate from when determining raw file names [default for IE613: 16130]\n");
 
   return;
 }
@@ -212,7 +215,7 @@ int main(int argc,char *argv[])
     }
   }
 
-
+  // Error if given an invalid sigproc header location
   if (strcmp(sphdrfname, "") == 0) {
     fprintf(stderr, "ERROR: Sigproc header not provided. Exiting.\n");
     exit(1);
@@ -221,14 +224,15 @@ int main(int argc,char *argv[])
   FILE* inputFiles[4];
   int compressedInput = 0;
   char tmpfname[msum] = "";
+  // Pattern check to determine if files are compressed or not
   if (strstr(udpfname, ".zst") != NULL) compressedInput = 1;
 
 
  
-  // Read sigproc header
+  // Read the provided sigproc header
   hdr = read_sigproc_header(sphdrfname, udpfname, ports);
 
-  // Check that the bin size is sufficiently large
+  // Check that the bin size and overlap sizes are sufficiently large to avoid issues with the convolution theorem
   if (checkinputs)
   {
     const double stg1 = (1.0 / 2.41e-4) *  abs(pow((double) hdr.fch1 + hdr.nsub * hdr.foff + hdr.foff *0.5,-2.0) - pow((double) hdr.fch1 + hdr.nsub * hdr.foff - hdr.foff *0.5, -2.0)) * (dm_start + dm_step * ndm);
@@ -240,6 +244,7 @@ int main(int argc,char *argv[])
     }
   }
 
+  // Open raw files
   for (int i = 0; i < 4; i++) {
     sprintf(tmpfname, udpfname, i + baseport);
     printf("Opening %s...\n", tmpfname);
@@ -253,11 +258,12 @@ int main(int argc,char *argv[])
     if (i == 0)
       strcpy(hdr.rawfname[i],tmpfname);
   }
-  // Read the number of subbands
+
+  // Read the number of raw subbands + sampling time for later
   nsub=hdr.nsub;
   double timeOffset = hdr.tsamp;
 
-  // Adjust header for filterbank format
+  // Adjust header for the target output
   hdr.tsamp*=nchan*ndec;
   hdr.nchan=nsub*nchan;
   if (redig) hdr.nbit=8;
@@ -266,7 +272,9 @@ int main(int argc,char *argv[])
   hdr.foff=-fabs(hdr.bwchan/nchan);
 
 
-  // Data size
+  // Data sizes; these control the block sizes for interall logic components
+  // FFTs are performed on a 3D block; of dims (nfft, nsub, nbin), there are
+  // overlaps of noverlap samples between each nbin element
   nvalid=nbin-2*noverlap;
   nsamp=nforward*nvalid;
   nfft=(int) ceil(nsamp/(float) nvalid);
@@ -275,9 +283,9 @@ int main(int argc,char *argv[])
   msamp=nsamp/nchan; // nforward * nvalid must be divisble by 8
   mblock=msamp/msum; // nforward * nvalid / 8 must be disible by msum
 
-
+  // Determine the number of packets we need to request per iteration
   const long int packetGulp = nsamp / 16;
-  reader = lofar_udp_meta_file_reader_setup(inputFiles, ports, 1, 11, 1, packetGulp, (long) -1, LONG_MAX, compressedInput);
+  reader = lofar_udp_meta_file_reader_setup(inputFiles, ports, 1, 11, 0, packetGulp, (long) -1, LONG_MAX, compressedInput);
   if (reader == NULL) {
     fprintf(stderr, "Failed to generate LOFAR UDP Reader, exiting.\n");
     exit(1);
@@ -292,6 +300,7 @@ int main(int argc,char *argv[])
       printf("Skipped %ld time stemps.\n", ts_skip * 16 );
   }
 
+  // Update the start time based on the first provided packet
   hdr.tstart = lofar_get_packet_time_mjd(reader->meta->inputData[0]);
 
   // Set device
@@ -319,9 +328,10 @@ int main(int argc,char *argv[])
   // DMcK: cuFFT docs say it's best practice to plan before allocating memory
   // cuda-memcheck fails initialisation before this block is run? -- add =1 as an env flag
   
-  // Disable initial memory allocates and ilence the compiler  warnings; 
+  // Disable initial memory allocates and silence the compiler  warnings; 
   // Nvidia uses a custom compiler frontend so GCC pragmas do not work.
-  // This order-of-execution follows Nvidia's usage guidance
+  // This order-of-execution follows Nvidia's usage guidance, so the warnings
+  // should be (safely?) ignored
   #pragma diag_suppress used_before_set
   cufftSetAutoAllocation(ftc2cf, 0);
   cufftSetAutoAllocation(ftc2cb, 0);
@@ -333,7 +343,6 @@ int main(int argc,char *argv[])
   checkCudaErrors(cufftPlanMany(&ftc2cf,1,&nbin,&iembed,istride,idist,&oembed,ostride,odist,CUFFT_C2C,nfft*nsub));
   checkCudaErrors(cufftGetSizeMany(ftc2cf, 1,&nbin,&iembed,istride,idist,&oembed,ostride,odist,CUFFT_C2C,nfft*nsub, &cfSize));
   //cufftSetStream(ftc2cf,streams[0]);
-  // Total malloc (FFT forward)
 
   // Generate FFT plan (batch in-place backward FFT)
   idist=mbin;  odist=mbin;  iembed=mbin;  oembed=mbin;  istride=1;  ostride=1;
@@ -341,19 +350,22 @@ int main(int argc,char *argv[])
   checkCudaErrors(cufftGetSizeMany(ftc2cb, 1,&mbin,&iembed,istride,idist,&oembed,ostride,odist,CUFFT_C2C,nchan*nfft*nsub,&cbSize));
   //cufftSetStream(ftc2cb,streams[0]);
   cudaDeviceSynchronize();
-  // Total malloc (backward)
 
-  // Get the maximum size needed for the FFT operations
-
+  // Get the maximum size needed for the FFT operations (they should be the same, check for safety)
   size_t minfftSize = cfSize > cbSize ? cfSize : cbSize;
   if (VERB) printf("Allocated %ldMB for cuFFT work (saving %ldMB)\n", minfftSize >> 20, (cfSize + cbSize - minfftSize) >> 20);
 
-
+  // Predict the overall VRAM usage
   long unsigned int bytesUsed = sizeof(cufftComplex) * nbin * nfft * nsub * 4 + sizeof(cufftComplex) * nbin *nsub * ndm + sizeof(float) * mblock * mchan * 2 + sizeof(char) * nsamp * nsub * 4 + sizeof(float) * nsamp * nsub + redig * msamp * mchan / ndec - (redig - 1) * 4 * msamp * mchan * ndec;
+  
+  // Get the total / available VRAM
+  size_t gpuMems[2];
+  checkCudaErrors(cudaMemGetInfo(&(gpuMems[0]), &(gpuMems[1])));
+  if (VERB) printf("Preparing for GPU memory allocations. Current memory usage: %ld / %ld GB\n", (gpuMems[1] - gpuMems[0]) >> 30, gpuMems[1] >> 30);
   if (VERB) printf("We anticipate %ld MB (%ld GB) to be allocated on the GPU (%ld MB for cuFFT planning).\n", (bytesUsed + minfftSize) >> 20, (bytesUsed + minfftSize) >> 30, minfftSize >> 20);
 
 
-  // Allocate the maxmimum memory needed
+  // Allocate the maxmimum memory needed for FFT operations
   void* cufftWorkArea;
   checkCudaErrors(cudaMalloc((void**) &cufftWorkArea, (size_t) minfftSize));
   // Set the cuFFT handles to use this area
@@ -391,7 +403,7 @@ int main(int argc,char *argv[])
   fbuf=(float *) malloc(sizeof(float)*nsamp*nsub);
   checkCudaErrors(cudaMalloc((void **) &dfbuf, (size_t) sizeof(float)*nsamp*nsub));
   
-
+  // Allocate final data product memories; differs based on wheter we are re-digitising before writing to disk or not
   if (redig) {
     for(i = 0; i < 2; i++)
       cbuf[i] = (unsigned char**) malloc(sizeof(unsigned char*)*ndm);
@@ -791,7 +803,7 @@ struct header read_header(FILE *inputfile) /* includefile */
       dummyread = fread(&(hdr.tel),sizeof(hdr.tel),1,inputfile);
       totalbytes+=sizeof(hdr.tel);
     } else if (strings_equal(string, (char *) "machine_id")) {
-      fseek(inputfile, sizeof(int), SEEK_CUR);
+      dummyread = fread(&(hdr.mach),sizeof(hdr.mach),1,inputfile);
       totalbytes+=sizeof(int);
     } else if (strings_equal(string, (char *) "data_type")) {
       fseek(inputfile, sizeof(int), SEEK_CUR);
@@ -1214,7 +1226,7 @@ void write_filterbank_header(struct header h,FILE *file)
   send_string(h.rawfname[0],file);
   send_string("source_name",file);
   send_string(h.source_name,file);
-  send_int("machine_id",11,file);
+  send_int("machine_id",h.mach,file);
   send_int("telescope_id",h.tel,file);
   send_double("src_raj",h.src_raj,file);
   send_double("src_dej",h.src_dej,file);
