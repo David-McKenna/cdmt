@@ -13,9 +13,9 @@ LFLAGS_udp = -lm -L$(CUDAPATH)/lib64 -L./cuda-samples/Common -lcufft -lcurand -X
 
 
 # Compilers
-NVCC = $(CUDAPATH)/bin/nvcc -arch=sm_70 -O3 --use_fast_math
 CC = gcc
 CXX = g++
+NVCC = $(CUDAPATH)/bin/nvcc -arch=sm_70 -O3 --use_fast_math -ccbin=$(CXX)
 
 ifeq ($(CC), icc)
 LFLAGS_udp += -L$(ONEAPI_ROOT)/compiler/latest/linux/compiler/lib/intel64_lin/ -liomp5 -lirc"
@@ -35,7 +35,17 @@ cdmt_udp: git cdmt_udp.o
 cdmt_udp.o: cdmt_udp.cu
 	$(NVCC) $(CFLAGS_udp) -o $@ -c $<
 
-all: cdmt cdmt_udp
+cdmt_udp_stokesV: stokesVPrep cdmt_udp_stokesV.o
+	$(NVCC) $(CFLAGS_udp) -o cdmt_udp_stokesV  ./cdmt_udp_stokesV.o $(LFLAGS_udp)
+
+stokesVPrep:
+	cp ./cdmt_udp.cu ./cdmt_udp_stokesV.cu
+	sed -i 's/cp1\[idx1\]\.x\*cp1\[idx1\]\.x+cp1\[idx1\]\.y\*cp1\[idx1\]\.y+cp2\[idx1\]\.x\*cp2\[idx1\]\.x+cp2\[idx1\]\.y\*cp2\[idx1\]\.y/2.0 \* ((cp1\[idx1\]\.x \* cp2\[idx1\]\.y) - (cp1\[idx1\]\.y \* cp2\[idx1\]\.x))/g' cdmt_udp_stokesV.cu
+
+cdmt_udp_stokesV.o:cdmt_udp_stokesV.cu
+	$(NVCC) $(CFLAGS_udp) -o $@ -c $<
+
+all: cdmt cdmt_udp cdmt_udp_stokesV
 
 git:
 	git submodule update --init --recursive --remote
@@ -44,4 +54,5 @@ git:
 clean:
 	rm -f *.o
 	rm -f *~
+	rm *stokesV.cu
 	cd udpPacketManager; make clean

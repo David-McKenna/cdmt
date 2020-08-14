@@ -93,6 +93,7 @@ void usage()
   printf("-w               Print warnings about input parameter sizes [default: true]\n");
   printf("-p <num>         Number of ports of data to process [default: 4]\n");
   printf("-l <num>         Base port number to iterate from when determining raw file names [default for IE613: 16130]\n");
+  printf("-t               Perform a dry run; proceed as expected until we would start processing data.\n");
 
   return;
 }
@@ -117,7 +118,7 @@ int main(int argc,char *argv[])
   int bytes_read;
   long int ts_read=LONG_MAX,ts_skip=0;
   long int total_ts_read=0;
-  int part=0,device=0,nforward=128,redig=1,ports=4,baseport=16130,checkinputs=1;
+  int part=0,device=0,nforward=128,redig=1,ports=4,baseport=16130,checkinputs=1,testmode=0;
   int arg=0;
   FILE **outfile;
   struct timespec tick, tick0, tick1, tock, tock0;
@@ -127,7 +128,8 @@ int main(int argc,char *argv[])
 
   // Read options
   if (argc>1) {
-    while ((arg=getopt(argc,argv,"awc:p:f:d:D:ho:b:N:n:s:r:m:t:p:l:"))!=-1) {
+    while ((arg=getopt(argc,argv,"tawc:p:f:d:D:ho:b:N:n:s:r:m:t:p:l:"))!=-1) {
+      argc -= 1;
       switch (arg) {
   
       case 'n':
@@ -190,16 +192,23 @@ int main(int argc,char *argv[])
   baseport=atoi(optarg);
   break;
 
+      case 't':
+  testmode=1;
+  break;
+
       case 'h':
   usage();
   return 0;
 
-  return 0;
       }
     }
   } else {
     printf("Unknown option '%c'\n", arg);
     usage();
+    return 0;
+  }
+  if (argc == 0) {
+    fprintf(stderr, "Failed to provide a source file, exiting.\n");
     return 0;
   }
   udpfname=argv[optind];
@@ -502,6 +511,9 @@ int main(int argc,char *argv[])
 
   cufftSetStream(ftc2cf, stream);
   cufftSetStream(ftc2cb, stream);
+  
+  if (testmode)
+    exit(0);
 
   CLICK(tick);
   for (int iblock=0;;iblock++) {
