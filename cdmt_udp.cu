@@ -64,7 +64,22 @@ void write_to_disk_char(unsigned char* outputArray, FILE** outputFile, int nsamp
 void write_filterbank_header(struct header h,FILE *file);
 int reshapeRawUdp(lofar_udp_reader *reader);
 long  __inline__ beamformed_packno(unsigned int timestamp, unsigned int sequence);
+long getStartingPacket(char inputTime[], const int clock200MHz);
 
+
+long getStartingPacket(char inputTime[], const int clock200MHz) {
+  struct tm unixTm;
+  time_t unixEpoch;
+
+  if(strptime(inputTime, "%Y-%m-%dT%H:%M:%S", &unixTm) != NULL) {
+    unixEpoch = timegm(&unixTm);
+    return beamformed_packno((unsigned long int) unixEpoch, 0, clock200MHz);
+  } else {
+    fprintf(stderr, "Invalid time string, exiting.\n");
+    return 1;
+  }
+
+}
 // External prototypes from udpPacketManager
 extern "C"
 {
@@ -84,7 +99,7 @@ void usage()
   printf("-o <outputname>           Output filename [default: cdmt]\n");
   printf("-N <forward FFT size>     Forward FFT size [integer, default: 65536]\n");
   printf("-n <overlap region>       Overlap region [integer, default: 2048]\n");
-  printf("-s <packets>     Number of packets to skip in the filterbank before stating processing [integer, default: 0]\n");
+  printf("-s <ISOT str>    Time to skip to when starting to process data [default: "", only supports 200MHz clock]\n");
   printf("-r <packets>     Number of packets to read in total from the -s offset [integer, default: length of file]\n");
   printf("-m <hdr loc>     Sigproc header to read metadata from [default: fil prefix.sigprochdr]\n");
   printf("-f <FFTs per op> Number of FFTs to execute per cuFFT call [default: 128]\n");
@@ -114,9 +129,9 @@ int main(int argc,char *argv[])
   dim3 blocksize,gridsize;
   struct header hdr;
   float *dm,*ddm,dm_start,dm_step;
-  char fname[128],fheader[1024],*udpfname,sphdrfname[1024] = "",obsid[128]="cdmt";
+  char fname[128],fheader[1024],*udpfname,sphdrfname[1024] = "",obsid[128]="cdmt",inputTime[128]="";
   int bytes_read;
-  long int ts_read=LONG_MAX,ts_skip=0;
+  long int ts_read=LONG_MAX;
   long int total_ts_read=0;
   int part=0,device=0,nforward=128,redig=1,ports=4,baseport=16130,checkinputs=1,testmode=0;
   int arg=0;
@@ -152,7 +167,7 @@ int main(int argc,char *argv[])
   break;
 
       case 's':
-  ts_skip=atol(optarg) / 16;
+  strcpy(inputTime, optarg);
   break;
   
       case 'r':
@@ -237,6 +252,13 @@ int main(int argc,char *argv[])
     }
   }
 
+  long startingPacket;
+  if (strcmp(inputTime, "") != 0) {
+    startingPacket = getStartingPacket(inputTime, 1);
+  } else{
+    startingPacket = -1;
+  }
+
 
   // Error if given an invalid sigproc header location
   if (strcmp(sphdrfname, "") == 0) {
@@ -311,21 +333,13 @@ int main(int argc,char *argv[])
   msamp=nsamp/nchan; // nforward * nvalid must be divisble by nchan
   mblock=msamp/msum; // nforward * nvalid / nchan must be disible by msum
 
+
   // Determine the number of packets we need to request per iteration
   const long int packetGulp = nsamp / 16;
-  reader = lofar_udp_meta_file_reader_setup(inputFiles, ports, 1, 11, 0, packetGulp, (long) -1, LONG_MAX, compressedInput);
+  reader = lofar_udp_meta_file_reader_setup(inputFiles, ports, 1, 11, 0, packetGulp, startingPacket, LONG_MAX, compressedInput);
   if (reader == NULL) {
     fprintf(stderr, "Failed to generate LOFAR UDP Reader, exiting.\n");
     exit(1);
-  }
-
-  if (ts_skip > 0) {
-      if (int returnVal = lofar_udp_file_reader_reuse(reader, reader->meta->lastPacket + ts_skip, -1) > 0) {
-        fprintf(stderr, "Error re-initialising reader for %ld packets skipped (error %d), exiting.\n", ts_skip, returnVal);
-        exit(1);
-      }
-
-      printf("Skipped %ld time stemps.\n", ts_skip * 16 );
   }
 
   // Update the start time based on the first provided packet
