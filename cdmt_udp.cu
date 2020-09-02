@@ -129,7 +129,6 @@ int main(int argc,char *argv[])
   // Read options
   if (argc>1) {
     while ((arg=getopt(argc,argv,"tawc:p:f:d:D:ho:b:N:n:s:r:m:t:p:l:"))!=-1) {
-      argc -= 1;
       switch (arg) {
   
       case 'n':
@@ -207,7 +206,8 @@ int main(int argc,char *argv[])
     usage();
     return 0;
   }
-  if (argc == 0) {
+
+  if (argc <= optind) {
     fprintf(stderr, "Failed to provide a source file, exiting.\n");
     return 0;
   }
@@ -271,6 +271,10 @@ int main(int argc,char *argv[])
   // Open raw files
   for (int i = 0; i < 4; i++) {
     sprintf(tmpfname, udpfname, i + baseport);
+    if (strcmp(udpfname, tmpfname) == 0 && ports > 1) {
+      fprintf(stderr, "ERROR: Input file name has not changed when attempting to substitute in port, have you correctly defined your file name?\n");
+      exit(1);
+    }
     printf("Opening %s...\n", tmpfname);
 
     inputFiles[i] = fopen(tmpfname, "r");
@@ -302,10 +306,10 @@ int main(int argc,char *argv[])
   nvalid=nbin-2*noverlap;
   nsamp=nforward*nvalid;
   nfft=(int) ceil(nsamp/(float) nvalid);
-  mbin=nbin/nchan; // nbin must be evenly divisible by 8
+  mbin=nbin/nchan; // nbin must be evenly divisible by nchan
   mchan=nsub*nchan;
-  msamp=nsamp/nchan; // nforward * nvalid must be divisble by 8
-  mblock=msamp/msum; // nforward * nvalid / 8 must be disible by msum
+  msamp=nsamp/nchan; // nforward * nvalid must be divisble by nchan
+  mblock=msamp/msum; // nforward * nvalid / nchan must be disible by msum
 
   // Determine the number of packets we need to request per iteration
   const long int packetGulp = nsamp / 16;
@@ -499,8 +503,6 @@ int main(int argc,char *argv[])
   double timeInSeconds = 0.0;
   nread = INT_MAX;
 
-  // Skip the first noverlap samples as they are 0'd
-  int writeOffset = 2 * noverlap;
   int writeSize;
 
 
@@ -529,7 +531,7 @@ int main(int argc,char *argv[])
     }
     CLICK(tock0);
     // Determine the output length
-    writeSize = (nread-writeOffset)*nsub/ndec;
+    writeSize = nread*nsub/ndec;
 
     // Count up the total bytes read and calculate the read time
     total_ts_read += nread;
@@ -558,7 +560,7 @@ int main(int argc,char *argv[])
     if (iblock > 0) {
       unpack_and_padd<<<gridsize,blocksize,0,stream>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
     } else {
-      unpack_and_padd_first_iteration<<<gridsize,blocksize,0,stream>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);;
+      unpack_and_padd_first_iteration<<<gridsize,blocksize,0,stream>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
     }
 
     // Perform FFTs
@@ -652,16 +654,16 @@ int main(int argc,char *argv[])
     // Wrtie results to disk, waiting for each DM's memcpy to finish first
     for (idm=0;idm<ndm;idm++) {
       if (redig) {
-        write_to_disk_char(&(cbuf[streamIdx][idm][writeOffset*nsub/ndec]), &(outfile[idm]), writeSize, &(dmWriteEvents[streamIdx][idm]));
+        write_to_disk_char(cbuf[streamIdx][idm], &(outfile[idm]), writeSize, &(dmWriteEvents[streamIdx][idm]));
       } else {
-        write_to_disk_float(&(cbuff[streamIdx][idm][writeOffset*nsub/ndec]), &(outfile[idm]), writeSize, &(dmWriteEvents[streamIdx][idm]));
+        write_to_disk_float(cbuff[streamIdx][idm], &(outfile[idm]), writeSize, &(dmWriteEvents[streamIdx][idm]));
       }
     }
 
 
     CLICK(tock);
     printf("Processed %d DMs in %.2f s\n",ndm, TICKTOCK(tick1, tock));
-    timeInSeconds += (double) (nread - writeOffset) * timeOffset;
+    timeInSeconds += (double) nread * timeOffset;
     elapsedTime = (double) TICKTOCK(tick, tock);
     printf("Current data processed: %02ld:%02ld:%05.2lf (%1.2lfs) in %1.2lf seconds (%1.2lf/s)\n\n", (long int) (timeInSeconds / 3600.0), (long int) ((fmod(timeInSeconds, 3600.0)) / 60.0), fmod(timeInSeconds, 60.0), timeInSeconds, elapsedTime, (double) timeInSeconds / elapsedTime);
 
@@ -670,9 +672,6 @@ int main(int argc,char *argv[])
       break;
     }
 
-    if (iblock == 0) {
-      writeOffset = 0;
-    }
 
   }
 
@@ -1086,7 +1085,7 @@ __global__ void unpack_and_padd_first_iteration(char *dbuf0,char *dbuf1,char *db
       cp1[idx1].y=(float) dbuf1[idx2];
       cp2[idx1].x=(float) dbuf2[idx2];
       cp2[idx1].y=(float) dbuf3[idx2];
-    } else if (isamp >= noverlap) {
+    } else if (isamp > -noverlap) {
       idx1=ibin+nbin*isub+nsub*nbin*ifft;
       idx2=isub+nsub*(2*noverlap-isamp);
 
