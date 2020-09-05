@@ -517,6 +517,8 @@ int main(int argc,char *argv[])
   double timeInSeconds = 0.0;
   nread = INT_MAX;
 
+  // Skip the first noverlap samples as they are 0'd
+  int writeOffset = noverlap;
   int writeSize;
 
 
@@ -545,7 +547,7 @@ int main(int argc,char *argv[])
     }
     CLICK(tock0);
     // Determine the output length
-    writeSize = nread*nsub/ndec;
+    writeSize = (nread-writeOffset)*nsub/ndec;
 
     // Count up the total bytes read and calculate the read time
     total_ts_read += nread;
@@ -668,16 +670,16 @@ int main(int argc,char *argv[])
     // Wrtie results to disk, waiting for each DM's memcpy to finish first
     for (idm=0;idm<ndm;idm++) {
       if (redig) {
-        write_to_disk_char(cbuf[streamIdx][idm], &(outfile[idm]), writeSize, &(dmWriteEvents[streamIdx][idm]));
+        write_to_disk_char(&(cbuf[streamIdx][idm][writeOffset*nsub/ndec]), &(outfile[idm]), writeSize, &(dmWriteEvents[streamIdx][idm]));
       } else {
-        write_to_disk_float(cbuff[streamIdx][idm], &(outfile[idm]), writeSize, &(dmWriteEvents[streamIdx][idm]));
+        write_to_disk_float(&(cbuff[streamIdx][idm][writeOffset*nsub/ndec]), &(outfile[idm]), writeSize, &(dmWriteEvents[streamIdx][idm]));
       }
     }
 
 
     CLICK(tock);
     printf("Processed %d DMs in %.2f s\n",ndm, TICKTOCK(tick1, tock));
-    timeInSeconds += (double) nread * timeOffset;
+    timeInSeconds += (double) (nread - writeOffset) * timeOffset;
     elapsedTime = (double) TICKTOCK(tick, tock);
     printf("Current data processed: %02ld:%02ld:%05.2lf (%1.2lfs) in %1.2lf seconds (%1.2lf/s)\n\n", (long int) (timeInSeconds / 3600.0), (long int) ((fmod(timeInSeconds, 3600.0)) / 60.0), fmod(timeInSeconds, 60.0), timeInSeconds, elapsedTime, (double) timeInSeconds / elapsedTime);
 
@@ -686,6 +688,9 @@ int main(int argc,char *argv[])
       break;
     }
 
+    if (iblock == 0) {
+      writeOffset = 0;
+    }
 
   }
 
