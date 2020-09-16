@@ -280,7 +280,7 @@ int main(int argc,char *argv[])
   // Check that the bin size and overlap sizes are sufficiently large to avoid issues with the convolution theorem
   if (checkinputs)
   {
-    const double stg1 = (1.0 / 2.41e-4) *  abs(pow((double) hdr.fch1 + hdr.nsub * hdr.foff + hdr.foff *0.5,-2.0) - pow((double) hdr.fch1 + hdr.nsub * hdr.foff - hdr.foff *0.5, -2.0)) * (dm_start + dm_step * ndm);
+    const double stg1 = (1.0 / 2.41e-4) *  abs(pow((double) hdr.fch1 + hdr.nsub * hdr.foff + hdr.foff *0.5,-2.0) - pow((double) hdr.fch1 + hdr.nsub * hdr.foff - hdr.foff *0.5, -2.0)) * (dm_start + dm_step * (ndm - 1));
     const int overlapCheck = (int) (stg1 / hdr.tsamp);
     if (overlapCheck > nbin) {
       fprintf(stderr, "WARNING: The size of your FFT bin is too short for the given DMs and frequencies. Given bin size: %d, Suggested minimum bin size: %d (maximum dispersion delay %f).\n", nbin, overlapCheck, stg1);
