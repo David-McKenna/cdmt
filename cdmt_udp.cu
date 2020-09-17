@@ -337,8 +337,14 @@ int main(int argc,char *argv[])
   // Determine the number of packets we need to request per iteration
   const long int packetGulp = nsamp / 16;
   reader = lofar_udp_meta_file_reader_setup(inputFiles, ports, 1, 11, 0, packetGulp, startingPacket, LONG_MAX, compressedInput);
+
   if (reader == NULL) {
     fprintf(stderr, "Failed to generate LOFAR UDP Reader, exiting.\n");
+    exit(1);
+  }
+
+  if (reader->meta->totalBeamlets != nsub) {
+    fprintf(stderr, "ERROR: Number of beamlets does not match number of channels in header, exiting.\n");
     exit(1);
   }
 
