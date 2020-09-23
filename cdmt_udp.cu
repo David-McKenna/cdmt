@@ -13,8 +13,8 @@
 #include <limits.h>
 #include <omp.h>
 
-#include "udpPacketManager/lofar_udp_reader.h"
-#include "udpPacketManager/lofar_udp_misc.h"
+#include "lofar_udp_reader.h"
+#include "lofar_udp_misc.h"
 
 // Timing macro
 #ifndef __LOFAR_UDP_TICKTOCK_MACRO
