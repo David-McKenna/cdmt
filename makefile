@@ -49,10 +49,9 @@ all: cdmt cdmt_udp cdmt_udp_stokesV
 
 git:
 	git submodule update --init --recursive --remote
-	cd udpPacketManager; make library
 
 clean:
 	rm -f *.o
 	rm -f *~
-	rm *stokesV.cu
-	cd udpPacketManager; make clean
+	rm *stokesV.cu; exit 0;
+	
