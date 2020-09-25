@@ -337,6 +337,7 @@ int main(int argc,char *argv[])
 
   // Determine the number of packets we need to request per iteration
   const long int packetGulp = nsamp / 16;
+  printf("Loading %ld packets per gulp. Settin up reader...\n", packetGulp);
   reader = lofar_udp_meta_file_reader_setup(inputFiles, ports, 1, 11, 0, packetGulp, startingPacket, LONG_MAX, compressedInput);
 
   if (reader == NULL) {
