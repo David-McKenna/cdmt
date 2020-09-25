@@ -5,11 +5,11 @@ CUDAPATH = $(shell dirname $(shell dirname $(shell which nvcc)))
 CFLAGS = -I./cuda-samples/Common
 
 CFLAGS_hdf = $(CFLAGS) -I/usr/include/hdf5/serial/
-CFLAGS_udp = $(CFLAGS) -I./udpPacketManager/ -Xcompiler "-fopenmp"
+CFLAGS_udp = $(CFLAGS) -Xcompiler "-fopenmp"
 
 # Linking flags
 LFLAGS = -lm -L$(CUDAPATH)/lib64 -lcufft -lhdf5 -lcurand
-LFLAGS_udp = -lm -L$(CUDAPATH)/lib64 -L./cuda-samples/Common -lcufft -lcurand -Xlinker "-L./udpPacketManager/ -lzstd -llofudpman
+LFLAGS_udp = -lm -L$(CUDAPATH)/lib64 -L./cuda-samples/Common -lcufft -lcurand -Xlinker "-lzstd -llofudpman
 
 
 # Compilers
@@ -49,10 +49,9 @@ all: cdmt cdmt_udp cdmt_udp_stokesV
 
 git:
 	git submodule update --init --recursive --remote
-	cd udpPacketManager; make library
 
 clean:
 	rm -f *.o
 	rm -f *~
-	rm *stokesV.cu
-	cd udpPacketManager; make clean
+	rm *stokesV.cu; exit 0;
+

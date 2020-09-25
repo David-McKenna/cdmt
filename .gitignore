@@ -1,4 +1,5 @@
 cdmt
 cdmt_udp
+cdmt_udp_*
 *.o
 

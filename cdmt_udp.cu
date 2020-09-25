@@ -62,7 +62,7 @@ __global__ void decimate(float *z,int ndec,int nchan,int nblock,int nsum,float *
 void write_to_disk_float(float* outputArray, FILE** outputFile, int nsamples, cudaEvent_t* waitEvent);
 void write_to_disk_char(unsigned char* outputArray, FILE** outputFile, int nsamples, cudaEvent_t* waitEvent);
 void write_filterbank_header(struct header h,FILE *file);
-int reshapeRawUdp(lofar_udp_reader *reader);
+int reshapeRawUdp(lofar_udp_reader *reader, int verbose);
 long  __inline__ beamformed_packno(unsigned int timestamp, unsigned int sequence);
 long getStartingPacket(char inputTime[], const int clock200MHz);
 
@@ -105,7 +105,7 @@ void usage()
   printf("-f <FFTs per op> Number of FFTs to execute per cuFFT call [default: 128]\n");
   printf("-a               Disable redigitisation; output float32 [default: false]\n");
   printf("-c <num chan>    Channelisation Factor [default: 8]\n");
-  printf("-w               Print warnings about input parameter sizes [default: true]\n");
+  printf("-w               Print warnings about input parameter sizes and packet loss [default: true]\n");
   printf("-p <num>         Number of ports of data to process [default: 4]\n");
   printf("-l <num>         Base port number to iterate from when determining raw file names [default for IE613: 16130]\n");
   printf("-t               Perform a dry run; proceed as expected until we would start processing data.\n");
@@ -255,6 +255,7 @@ int main(int argc,char *argv[])
   long startingPacket;
   if (strcmp(inputTime, "") != 0) {
     startingPacket = getStartingPacket(inputTime, 1);
+    printf("Skipping to packet %ld (%s)\n", startingPacket, inputTime);
   } else{
     startingPacket = -1;
   }
@@ -291,7 +292,7 @@ int main(int argc,char *argv[])
 
 
   // Open raw files
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < ports; i++) {
     sprintf(tmpfname, udpfname, i + baseport);
     if (strcmp(udpfname, tmpfname) == 0 && ports > 1) {
       fprintf(stderr, "ERROR: Input file name has not changed when attempting to substitute in port, have you correctly defined your file name?\n");
@@ -336,6 +337,7 @@ int main(int argc,char *argv[])
 
   // Determine the number of packets we need to request per iteration
   const long int packetGulp = nsamp / 16;
+  printf("Loading %ld packets per gulp. Setting up reader...\n", packetGulp);
   reader = lofar_udp_meta_file_reader_setup(inputFiles, ports, 1, 11, 0, packetGulp, startingPacket, LONG_MAX, compressedInput);
 
   if (reader == NULL) {
@@ -547,7 +549,7 @@ int main(int argc,char *argv[])
 
     // Read in the next block
     CLICK(tick0);
-    nread_tmp = reshapeRawUdp(reader);
+    nread_tmp = reshapeRawUdp(reader, checkinputs);
     if (nread > nread_tmp) {
       nread = nread_tmp;
     }
@@ -1102,9 +1104,9 @@ __global__ void unpack_and_padd_first_iteration(char *dbuf0,char *dbuf1,char *db
   // Only compute valid threads
   if (ibin<nbin && ifft<nfft && isub<nsub) {
     isamp=ibin+(nbin-2*noverlap)*ifft-noverlap;
-    if (isamp >= 2*noverlap) {
+    if (isamp >= noverlap) {
       idx1=ibin+nbin*isub+nsub*nbin*ifft;
-      idx2=isub+nsub*(isamp-2*noverlap);
+      idx2=isub+nsub*(isamp-noverlap);
 
       cp1[idx1].x=(float) dbuf0[idx2];
       cp1[idx1].y=(float) dbuf1[idx2];
@@ -1112,7 +1114,7 @@ __global__ void unpack_and_padd_first_iteration(char *dbuf0,char *dbuf1,char *db
       cp2[idx1].y=(float) dbuf3[idx2];
     } else if (isamp > -noverlap) {
       idx1=ibin+nbin*isub+nsub*nbin*ifft;
-      idx2=isub+nsub*(2*noverlap-isamp);
+      idx2=isub+nsub*(noverlap-isamp);
 
       cp1[idx1].x=(float) dbuf0[idx2];
       cp1[idx1].y=(float) dbuf1[idx2];
@@ -1144,11 +1146,10 @@ __global__ void padd_next_iteration(char *dbuf0,char *dbuf1,char *dbuf2,char *db
 
   // Only compute valid threads
   if (ibin<nbin && ifft<nfft && isub<nsub) {
-    isamp=ibin+(nbin-2*noverlap)*ifft-noverlap;
-    if (isamp<noverlap) {
-      // VVV FIX
+    isamp=ibin+(nbin-2*noverlap)*ifft;
+    if (isamp<2*noverlap) {
       idx1=ibin+nbin*isub+nsub*nbin*ifft;
-      idx2=isub+nsub*(isamp+nsamp-noverlap);
+      idx2=isub+nsub*(isamp+nsamp-2*noverlap);
       cp1[idx1].x=(float) dbuf0[idx2];
       cp1[idx1].y=(float) dbuf1[idx2];
       cp2[idx1].x=(float) dbuf2[idx2];
@@ -1440,13 +1441,17 @@ __global__ void decimate(float *z,int ndec,int nchan,int nblock,int nsum,float *
   return;
 }
 
-int reshapeRawUdp(lofar_udp_reader *reader) {
+int reshapeRawUdp(lofar_udp_reader *reader, int verbose) {
 
   if (lofar_udp_reader_step(reader) > 0) return 0;
   int nread = reader->meta->packetsPerIteration;
-
- // MODE 11
-
+  if (verbose) {
+    for (int i = 0; i < reader->meta->numPorts; i++) {
+      if (reader->meta->portLastDroppedPackets[i] != 0) {
+        printf("Port %d: %d dropped packets.\n", i, reader->meta->portLastDroppedPackets[i]);
+      }
+    }
+  }
   nread *= 16;
 
   return nread;
