@@ -255,6 +255,7 @@ int main(int argc,char *argv[])
   long startingPacket;
   if (strcmp(inputTime, "") != 0) {
     startingPacket = getStartingPacket(inputTime, 1);
+    printf("Skipping to packet %ld (%s)\n", startingPacket, inputTime);
   } else{
     startingPacket = -1;
   }
@@ -291,7 +292,7 @@ int main(int argc,char *argv[])
 
 
   // Open raw files
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < ports; i++) {
     sprintf(tmpfname, udpfname, i + baseport);
     if (strcmp(udpfname, tmpfname) == 0 && ports > 1) {
       fprintf(stderr, "ERROR: Input file name has not changed when attempting to substitute in port, have you correctly defined your file name?\n");
