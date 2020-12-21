@@ -213,7 +213,7 @@ int main(int argc,char *argv[])
   break;
 
       case 'z':
-  dreamBeam += 1;
+  dreamBeam = 1;
   strcpy(subbands, optarg);
   break;
 
@@ -407,6 +407,8 @@ int main(int argc,char *argv[])
 
   printf("Loading %ld packets per gulp. Setting up reader...\n", packetGulp);
   reader = lofar_udp_meta_file_reader_setup_struct(&udp_cfg);
+
+  printf("Reader: %d, %d.\t %d, %d.\t %d, %ld, %d\n", reader->totalRawBeamlets, reader->totalProcBeamlets, reader->inputBitMode, reader->outputBitMode, reader->processingMode, reader->packetsPerIteration, reader->replayDroppedPackets);
 
   if (reader == NULL) {
     fprintf(stderr, "Failed to generate LOFAR UDP Reader, exiting.\n");
@@ -658,6 +660,8 @@ int main(int argc,char *argv[])
         checkCudaErrors(cudaMemcpyAsync(dudpbuf_f[i],udpbuf[i],sizeof(float)*nread*nsub,cudaMemcpyHostToDevice,stream));
       }
     }
+
+    printf("%ld, %ld\n", sizeof(float)*nread*nsub, reader->packetOutputLength * reader->packetsPerIteration);
     cudaEventRecord(events[0], stream);
 
     // Unpack data and padd data
