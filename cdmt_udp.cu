@@ -661,7 +661,7 @@ int main(int argc,char *argv[])
       }
     }
 
-    printf("%ld, %ld\n", sizeof(float)*nread*nsub, reader->packetOutputLength * reader->packetsPerIteration);
+    printf("%ld, %ld\n", sizeof(float)*nread*nsub, reader->meta->packetOutputLength[0] * reader->meta->packetsPerIteration);
     cudaEventRecord(events[0], stream);
 
     // Unpack data and padd data
