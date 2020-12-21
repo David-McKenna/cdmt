@@ -49,9 +49,9 @@ __global__ void transpose_unpadd_and_detect(cufftComplex *cp1,cufftComplex *cp2,
 static __device__ __host__ inline cufftComplex ComplexScale(cufftComplex a,float s);
 static __device__ __host__ inline cufftComplex ComplexMul(cufftComplex a,cufftComplex b);
 static __global__ void PointwiseComplexMultiply(cufftComplex *a,cufftComplex *b,cufftComplex *c,int nx,int ny,int l,float scale);
-__global__ void unpack_and_padd(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2);
-__global__ void unpack_and_padd_first_iteration(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2);
-__global__ void padd_next_iteration(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2);
+template<typename I> __global__ void unpack_and_padd(I *dbuf0,I *dbuf1,I *dbuf2,I *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2);
+template<typename I> __global__ void unpack_and_padd_first_iteration(I *dbuf0,I *dbuf1,I *dbuf2,I *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2);
+template<typename I> __global__ void padd_next_iteration(I *dbuf0,I *dbuf1,I *dbuf2,I *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2);
 __global__ void swap_spectrum_halves(cufftComplex *cp1,cufftComplex *cp2,int nx,int ny);
 __global__ void compute_chirp(double fcen,double bw,float *dm,int nchan,int nbin,int nsub,int ndm,cufftComplex *c);
 __global__ void compute_block_sums(float *z,int nchan,int nblock,int nsum,float *bs1,float *bs2);
@@ -109,6 +109,8 @@ void usage()
   printf("-p <num>         Number of ports of data to process [default: 4]\n");
   printf("-l <num>         Base port number to iterate from when determining raw file names [default for IE613: 16130]\n");
   printf("-t               Perform a dry run; proceed as expected until we would start processing data.\n");
+  printf("-z <subband strategy>     Apply dreamBeam corrections to voltages (default: false).\n");
+  printf("-Z <lower>,<upper>        Extract only the specific beamlets (default: all)\n");
 
   return;
 }
@@ -117,10 +119,10 @@ int main(int argc,char *argv[])
 {
   int i,j,nsamp,nfft,mbin,nvalid,nchan=8,nbin=65536,noverlap=2048,nsub=20,ndm,ndec=1;
   int idm,nread_tmp,nread,mchan,msamp,mblock,msum=1024;
-  char *header,*udpbuf[4],*dudpbuf[4];
+  char *header,*udpbuf[4],*dudpbuf_c[4];
   FILE *file;
   unsigned char **cbuf[2],*dcbuf;
-  float **cbuff[2], *dcbuff;
+  float **cbuff[2], *dcbuff, *dudpbuf_f[4];
   float *fbuf,*dfbuf;
   float *bs1,*bs2,*zavg,*zstd;
   cufftComplex *cp1,*cp2,*dc,*cp1p,*cp2p;
@@ -129,11 +131,11 @@ int main(int argc,char *argv[])
   dim3 blocksize,gridsize;
   struct header hdr;
   float *dm,*ddm,dm_start,dm_step;
-  char fname[128],fheader[1024],*udpfname,sphdrfname[1024] = "",obsid[128]="cdmt",inputTime[128]="";
+  char fname[128],fheader[1024],*udpfname,sphdrfname[1024] = "",obsid[128]="cdmt",inputTime[128]="",subbands[4096]="";
   int bytes_read;
   long int ts_read=LONG_MAX;
   long int total_ts_read=0;
-  int part=0,device=0,nforward=128,redig=1,ports=4,baseport=16130,checkinputs=1,testmode=0;
+  int part=0,device=0,nforward=128,redig=1,ports=4,baseport=16130,checkinputs=1,testmode=0,dreamBeam=0,beamletLower=0,beamletUpper=0;
   int arg=0;
   FILE **outfile;
   struct timespec tick, tick0, tick1, tock, tock0;
@@ -143,7 +145,7 @@ int main(int argc,char *argv[])
 
   // Read options
   if (argc>1) {
-    while ((arg=getopt(argc,argv,"tawc:p:f:d:D:ho:b:N:n:s:r:m:t:p:l:"))!=-1) {
+    while ((arg=getopt(argc,argv,"tawc:p:f:d:D:ho:b:N:n:s:r:m:t:p:l:z:Z:"))!=-1) {
       switch (arg) {
   
       case 'n':
@@ -210,6 +212,16 @@ int main(int argc,char *argv[])
   testmode=1;
   break;
 
+      case 'z':
+  dreamBeam += 1;
+  strcpy(subbands, optarg);
+  break;
+
+      case 'Z':
+  dreamBeam += 1;
+  sscanf(optarg, "%d,%d", &beamletLower,&beamletUpper);
+  break;
+
       case 'h':
   usage();
   return 0;
@@ -228,6 +240,11 @@ int main(int argc,char *argv[])
   }
   udpfname=argv[optind];
 
+  if (dreamBeam == 1) {
+    fprintf(stderr, "ERROR: Only part of dreamBeam informaiton was provided. Both -z and -Z need to be provided. Exiting.\n");
+    exit(1);
+  }
+
   // Sanity checks to avoid voids in output filterbank
   if (checkinputs) 
   {
@@ -236,7 +253,7 @@ int main(int argc,char *argv[])
       exit(1);
     }
     if ((nforward * (nbin-2*noverlap)) % nchan != 0 ) {
-      fprintf(stderr, "ERROR: Valid data length must be divisible by nchan (%d) (currently %d, remainer %d). Exiting.", nchan, nbin-2*noverlap, (nbin-2*noverlap) % nchan);
+      fprintf(stderr, "ERROR: Valid data length must be divisible by nchan (%d) (currently %d, remainer %d). Exiting.\n", nchan, nbin-2*noverlap, (nbin-2*noverlap) % nchan);
       exit(1);
     }
 
@@ -277,6 +294,18 @@ int main(int argc,char *argv[])
  
   // Read the provided sigproc header
   hdr = read_sigproc_header(sphdrfname, udpfname, ports);
+
+  // Update to account for runtime-dropped dropped beamlets
+  if (beamletUpper != 0) {
+    hdr.fch1 += hdr.foff * (nsub - beamletUpper);
+    nsub = beamletUpper;
+  }
+
+  if (beamletLower != 0) {
+    nsub -= beamletLower;
+  }
+
+
 
   // Check that the bin size and overlap sizes are sufficiently large to avoid issues with the convolution theorem
   if (checkinputs)
@@ -334,18 +363,46 @@ int main(int argc,char *argv[])
   msamp=nsamp/nchan; // nforward * nvalid must be divisble by nchan
   mblock=msamp/msum; // nforward * nvalid / nchan must be disible by msum
 
-
   // Determine the number of packets we need to request per iteration
   const long int packetGulp = nsamp / 16;
+
+  lofar_udp_config udp_cfg = lofar_udp_config_default;
+
+  udp_cfg.inputFiles = inputFiles;
+  udp_cfg.numPorts = ports;
+  udp_cfg.replayDroppedPackets = 1;
+  udp_cfg.processingMode = 11;
+  udp_cfg.verbose = 0;
+  udp_cfg.packetsPerIteration = packetGulp;
+  udp_cfg.startingPacket = startingPacket;
+  udp_cfg.packetsReadMax = LONG_MAX;
+  udp_cfg.compressedReader = compressedInput;
+  udp_cfg.beamletLimits[0] = beamletLower;
+  udp_cfg.beamletLimits[1] = beamletUpper;
+  udp_cfg.calibrateData = dreamBeam;
+
+  lofar_udp_calibration udp_cal = lofar_udp_calibration_default;
+  udp_cfg.calibrationConfiguration = &udp_cal;
+  char fifo[128] = "/tmp/dreamBeamCDMTFIFO";
+
+  if (dreamBeam > 0) {
+    strcpy(udp_cal.calibrationFifo, fifo);
+    strcpy(udp_cal.calibrationSubbands, subbands);
+    udp_cal.calibrationPointing[0] = (float) hdr.src_raj;
+    udp_cal.calibrationPointing[1] = (float) hdr.src_dej;
+    strcpy(udp_cal.calibrationPointingBasis, "J2000");
+  }
+
+
   printf("Loading %ld packets per gulp. Setting up reader...\n", packetGulp);
-  reader = lofar_udp_meta_file_reader_setup(inputFiles, ports, 1, 11, 0, packetGulp, startingPacket, LONG_MAX, compressedInput);
+  reader = lofar_udp_meta_file_reader_setup_struct(&udp_cfg);
 
   if (reader == NULL) {
     fprintf(stderr, "Failed to generate LOFAR UDP Reader, exiting.\n");
     exit(1);
   }
 
-  if (reader->meta->totalBeamlets != nsub) {
+  if (reader->meta->totalProcBeamlets != nsub) {
     fprintf(stderr, "ERROR: Number of beamlets does not match number of channels in header, exiting.\n");
     exit(1);
   }
@@ -442,11 +499,18 @@ int main(int argc,char *argv[])
     checkCudaErrors(cudaMalloc((void **) &zstd, (size_t) sizeof(float)*mchan));
   }
 
-  // Allocate memory for redigitized output and header
+  // Allocate memory for input bytes and header
   header=(char *) malloc(sizeof(char)*HEADERSIZE);
-  for (i=0;i<4;i++) {
-    udpbuf[i]= reader->meta->outputData[i];
-    checkCudaErrors(cudaMalloc((void **) &dudpbuf[i], (size_t) sizeof(char)*nsamp*nsub));
+  if (dreamBeam == 0) {
+    for (i=0;i<4;i++) {
+      udpbuf[i]= reader->meta->outputData[i];
+      checkCudaErrors(cudaMalloc((void **) &dudpbuf_c[i], (size_t) sizeof(char)*nsamp*nsub));
+    }
+  } else {
+    for (i=0;i<4;i++) {
+      udpbuf[i]= reader->meta->outputData[i];
+      checkCudaErrors(cudaMalloc((void **) &dudpbuf_f[i], (size_t) sizeof(float)*nsamp*nsub));
+    }
   }
 
   // Allocate output buffers
@@ -574,17 +638,33 @@ int main(int argc,char *argv[])
     cudaStreamWaitEvent(stream, events[1], 0);
 
     CLICK(tick1);
-    for (i=0;i<4;i++)
-      checkCudaErrors(cudaMemcpyAsync(dudpbuf[i],udpbuf[i],sizeof(char)*nread*nsub,cudaMemcpyHostToDevice,stream));
+    if (dreamBeam == 0) {
+      for (i=0;i<4;i++) {
+        checkCudaErrors(cudaMemcpyAsync(dudpbuf_c[i],udpbuf[i],sizeof(char)*nread*nsub,cudaMemcpyHostToDevice,stream));
+      }
+    } else {
+      for (i=0;i<4;i++) {
+        checkCudaErrors(cudaMemcpyAsync(dudpbuf_f[i],udpbuf[i],sizeof(float)*nread*nsub,cudaMemcpyHostToDevice,stream));
+      }
+    }
     cudaEventRecord(events[0], stream);
 
     // Unpack data and padd data
     blocksize.x=32; blocksize.y=32; blocksize.z=1;
     gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft/blocksize.y+1; gridsize.z=nsub/blocksize.z+1;
-    if (iblock > 0) {
-      unpack_and_padd<<<gridsize,blocksize,0,stream>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
+    if (dreamBeam == 0) {
+      if (iblock > 0) {
+        unpack_and_padd<char><<<gridsize,blocksize,0,stream>>>(dudpbuf_c[0],dudpbuf_c[1],dudpbuf_c[2],dudpbuf_c[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
+      } else {
+        unpack_and_padd_first_iteration<char><<<gridsize,blocksize,0,stream>>>(dudpbuf_c[0],dudpbuf_c[1],dudpbuf_c[2],dudpbuf_c[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
+      }
     } else {
-      unpack_and_padd_first_iteration<<<gridsize,blocksize,0,stream>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
+      if (iblock > 0) {
+        unpack_and_padd<float><<<gridsize,blocksize,0,stream>>>(dudpbuf_f[0],dudpbuf_f[1],dudpbuf_f[2],dudpbuf_f[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
+      } else {
+        unpack_and_padd_first_iteration<float><<<gridsize,blocksize,0,stream>>>(dudpbuf_f[0],dudpbuf_f[1],dudpbuf_f[2],dudpbuf_f[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
+      }
+
     }
 
     // Perform FFTs
@@ -617,7 +697,11 @@ int main(int argc,char *argv[])
         cudaStreamWaitEvent(streams[numStreams], events[2], 0);
         blocksize.x=32; blocksize.y=32; blocksize.z=1;
         gridsize.x=nbin/blocksize.x+1; gridsize.y=nfft/blocksize.y+1; gridsize.z=nsub/blocksize.z+1;
-        padd_next_iteration<<<gridsize,blocksize,0,streams[numStreams]>>>(dudpbuf[0],dudpbuf[1],dudpbuf[2],dudpbuf[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
+        if (dreamBeam == 0) {
+          padd_next_iteration<char><<<gridsize,blocksize,0,streams[numStreams]>>>(dudpbuf_c[0],dudpbuf_c[1],dudpbuf_c[2],dudpbuf_c[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
+        } else {
+          padd_next_iteration<float><<<gridsize,blocksize,0,streams[numStreams]>>>(dudpbuf_f[0],dudpbuf_f[1],dudpbuf_f[2],dudpbuf_f[3],nread,nbin,nfft,nsub,noverlap,cp1p,cp2p);
+        }
         cudaEventRecord(events[1], streams[numStreams]);
       }
       // Swap spectrum halves for small FFTs
@@ -717,8 +801,14 @@ int main(int argc,char *argv[])
 
   // Free
   free(header);
-  for (i=0;i<4;i++) {
-    cudaFree(dudpbuf);  
+  if (dreamBeam == 0) {
+    for (i=0;i<4;i++) {
+      cudaFree(dudpbuf_c[i]);  
+    }
+  } else {
+    for (i=0;i<4;i++) {
+      cudaFree(dudpbuf_f[i]);  
+    }
   }
   free(fbuf);
   free(dm);
@@ -1060,7 +1150,7 @@ __global__ void compute_chirp(double fcen,double bw,float *dm,int nchan,int nbin
 // Unpack the input buffer and generate complex timeseries. The output
 // timeseries are padded with noverlap samples on either side for the
 // convolution.
-__global__ void unpack_and_padd(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2)
+template<typename I> __global__ void unpack_and_padd(I *dbuf0,I *dbuf1,I *dbuf2,I *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2)
 {
   int64_t ibin,ifft,isamp,isub,idx1,idx2;
 
@@ -1092,7 +1182,7 @@ __global__ void unpack_and_padd(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,
 // the final non-noverlap region and final noverlap region so that they can 
 // match the first noverlap region and first non-noverlap on the second
 // iteration
-__global__ void unpack_and_padd_first_iteration(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2)
+template<typename I> __global__ void unpack_and_padd_first_iteration(I *dbuf0,I *dbuf1,I *dbuf2,I *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2)
 {
   int64_t ibin,ifft,isamp,isub,idx1,idx2;
 
@@ -1135,7 +1225,7 @@ __global__ void unpack_and_padd_first_iteration(char *dbuf0,char *dbuf1,char *db
 // t = 1: nfft_0_N: overlap_0_1, nfft_1_0.... nfft_1_N-1:overlap_1_1
 // t = 2 nfft_1_N-1: overlap_1_1...
 // etc
-__global__ void padd_next_iteration(char *dbuf0,char *dbuf1,char *dbuf2,char *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2)
+template<typename I> __global__ void padd_next_iteration(I *dbuf0,I *dbuf1,I *dbuf2,I *dbuf3,int nsamp,int nbin,int nfft,int nsub,int noverlap,cufftComplex *cp1,cufftComplex *cp2)
 {
   int64_t ibin,ifft,isamp,isub,idx1,idx2;
 
