@@ -382,8 +382,8 @@ int main(int argc,char *argv[])
   float raj = 0.0, decj = 0.0, ras, decs;
   int rah, ram, decd, decm;
   if (dreamBeam == 1) {
-    sprintf(rajs, "%60f", hdr.src_raj);
-    sprintf(decjs, "%60f", hdr.src_dej);
+    sprintf(rajs, "%018.12f", hdr.src_raj);
+    sprintf(decjs, "%018.12f", hdr.src_dej);
 
     printf("rajs %s, decjs %s\n", rajs, decjs);
     sscanf(rajs, "%02d%02d%f", &rah, &ram, &ras);
