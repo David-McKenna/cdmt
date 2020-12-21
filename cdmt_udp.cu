@@ -1177,7 +1177,7 @@ template<typename I> __global__ void unpack_and_padd(I *dbuf0,I *dbuf1,I *dbuf2,
       idx1=ibin+nbin*isub+nsub*nbin*ifft;
       idx2=isub+nsub*(isamp-noverlap);
       cp1[idx1].x=(float) dbuf0[idx2];
-      printf("1: cp1[idx1].x: %f", cp1[idx1].x);
+      printf("1: cp1[idx1].x: %f\n", cp1[idx1].x);
       cp1[idx1].y=(float) dbuf1[idx2];
       cp2[idx1].x=(float) dbuf2[idx2];
       cp2[idx1].y=(float) dbuf3[idx2];
@@ -1211,7 +1211,7 @@ template<typename I> __global__ void unpack_and_padd_first_iteration(I *dbuf0,I 
       idx2=isub+nsub*(isamp-noverlap);
 
       cp1[idx1].x=(float) dbuf0[idx2];
-      printf("2: cp1[idx1].x: %f", cp1[idx1].x);
+      printf("2: cp1[idx1].x: %f\n", cp1[idx1].x);
       cp1[idx1].y=(float) dbuf1[idx2];
       cp2[idx1].x=(float) dbuf2[idx2];
       cp2[idx1].y=(float) dbuf3[idx2];
@@ -1220,7 +1220,7 @@ template<typename I> __global__ void unpack_and_padd_first_iteration(I *dbuf0,I 
       idx2=isub+nsub*(noverlap-isamp);
 
       cp1[idx1].x=(float) dbuf0[idx2];
-      printf("3: cp1[idx1].x: %f", cp1[idx1].x);
+      printf("3: cp1[idx1].x: %f\n", cp1[idx1].x);
       cp1[idx1].y=(float) dbuf1[idx2];
       cp2[idx1].x=(float) dbuf2[idx2];
       cp2[idx1].y=(float) dbuf3[idx2];
@@ -1255,7 +1255,7 @@ template<typename I> __global__ void padd_next_iteration(I *dbuf0,I *dbuf1,I *db
       idx1=ibin+nbin*isub+nsub*nbin*ifft;
       idx2=isub+nsub*(isamp+nsamp-2*noverlap);
       cp1[idx1].x=(float) dbuf0[idx2];
-      printf("4: cp1[idx1].x: %f", cp1[idx1].x);
+      printf("4: cp1[idx1].x: %f\n", cp1[idx1].x);
       cp1[idx1].y=(float) dbuf1[idx2];
       cp2[idx1].x=(float) dbuf2[idx2];
       cp2[idx1].y=(float) dbuf3[idx2];
