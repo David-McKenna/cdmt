@@ -378,14 +378,29 @@ int main(int argc,char *argv[])
 
   lofar_udp_calibration udp_cal = lofar_udp_calibration_default;
   udp_cfg.calibrationConfiguration = &udp_cal;
-  char fifo[128] = "/tmp/dreamBeamCDMTFIFO";
-
+  char fifo[128] = "/tmp/dreamBeamCDMTFIFO", rajs[64], decjs[64];
+  float raj = 0.0, decj = 0.0, ras, decs;
+  int rah, ram, decd, decm;
   if (dreamBeam == 1) {
+    sprintf(rajs, "%60f", hdr.src_raj)
+    sprintf(decjs, "%60f", hdr.src_dej)
+
+    printf("rajs %s, decjs %s\n", rajs, decjs);
+    sscanf(rajs, "%02d%02d%f", &rah, &ram, &ras);
+    sscanf(decjs, "%02d%02d%f", &decd, &decm, &decs);
+
+    raj = (float) rah * 0.26179958333 + (float) ram * 0.00436332638 + ras * 0.0000727221;
+    decj = (float) abs(decd) * 0.0174533 + (float) decm * 0.00029088833 + decs * 0.00000484813;
+
+    if (hdr.src_dej < 0)
+      decj *= -1;
+
+    printf("Raj: %f, Decj: %f\n", raj, decj);
     printf("Configuring calibration...\n");
     strcpy(udp_cal.calibrationFifo, fifo);
     strcpy(udp_cal.calibrationSubbands, subbands);
-    udp_cal.calibrationPointing[0] = (float) hdr.src_raj;
-    udp_cal.calibrationPointing[1] = (float) hdr.src_dej;
+    udp_cal.calibrationPointing[0] = raj;
+    udp_cal.calibrationPointing[1] = decj;
     strcpy(udp_cal.calibrationPointingBasis, "J2000");
   }
 
