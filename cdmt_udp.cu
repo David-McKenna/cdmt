@@ -382,10 +382,14 @@ int main(int argc,char *argv[])
   char fifo[128] = "/tmp/dreamBeamCDMTFIFO";
 
   if (dreamBeam == 1) {
+    printf("FIFO\n");
     strcpy(udp_cal.calibrationFifo, fifo);
+    printf("Subbands\n");
     strcpy(udp_cal.calibrationSubbands, subbands);
+    printf("Ra/Dec\n");
     udp_cal.calibrationPointing[0] = (float) hdr.src_raj;
     udp_cal.calibrationPointing[1] = (float) hdr.src_dej;
+    printf("basis\n");
     strcpy(udp_cal.calibrationPointingBasis, "J2000");
   }
 
