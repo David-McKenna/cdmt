@@ -376,20 +376,16 @@ int main(int argc,char *argv[])
   udp_cfg.beamletLimits[1] = beamletUpper;
   udp_cfg.calibrateData = dreamBeam;
 
-  printf("Configuring calibration...\n");
   lofar_udp_calibration udp_cal = lofar_udp_calibration_default;
   udp_cfg.calibrationConfiguration = &udp_cal;
   char fifo[128] = "/tmp/dreamBeamCDMTFIFO";
 
   if (dreamBeam == 1) {
-    printf("FIFO\n");
+    printf("Configuring calibration...\n");
     strcpy(udp_cal.calibrationFifo, fifo);
-    printf("Subbands\n");
     strcpy(udp_cal.calibrationSubbands, subbands);
-    printf("Ra/Dec\n");
     udp_cal.calibrationPointing[0] = (float) hdr.src_raj;
     udp_cal.calibrationPointing[1] = (float) hdr.src_dej;
-    printf("basis\n");
     strcpy(udp_cal.calibrationPointingBasis, "J2000");
   }
 
@@ -463,7 +459,7 @@ int main(int argc,char *argv[])
   if (VERB) printf("Allocated %ldMB for cuFFT work (saving %ldMB)\n", minfftSize >> 20, (cfSize + cbSize - minfftSize) >> 20);
 
   // Predict the overall VRAM usage
-  long unsigned int bytesUsed = sizeof(cufftComplex) * nbin * nfft * nsub * 4 + sizeof(cufftComplex) * nbin *nsub * ndm + sizeof(float) * mblock * mchan * 2 + sizeof(char) * nsamp * nsub * 4 + sizeof(float) * nsamp * nsub + redig * msamp * mchan / ndec - (redig - 1) * 4 * msamp * mchan * ndec;
+  long unsigned int bytesUsed = sizeof(cufftComplex) * nbin * nfft * nsub * 4 + sizeof(cufftComplex) * nbin *nsub * ndm + sizeof(float) * mblock * mchan * 2 + (sizeof(char) * (1 - dreamBeam) + sizeof(float) * dreamBeam) * nsamp * nsub * 4 + sizeof(float) * nsamp * nsub + redig * msamp * mchan / ndec - (redig - 1) * 4 * msamp * mchan * ndec;
   
   // Get the total / available VRAM
   size_t gpuMems[2];
