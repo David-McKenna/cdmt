@@ -383,14 +383,14 @@ int main(int argc,char *argv[])
 
   if (dreamBeam == 1) {
     printf("FIFO\n");
-    strcpy(udp_cal.calibrationFifo, fifo);
+    strcpy(&(udp_cal.calibrationFifo[0]), fifo);
     printf("Subbands\n");
-    strcpy(udp_cal.calibrationSubbands, subbands);
+    strcpy(&(udp_cal.calibrationSubbands[0]), subbands);
     printf("Ra/Dec\n");
     udp_cal.calibrationPointing[0] = (float) hdr.src_raj;
     udp_cal.calibrationPointing[1] = (float) hdr.src_dej;
     printf("basis\n");
-    strcpy(udp_cal.calibrationPointingBasis, "J2000");
+    strcpy(&(udp_cal.calibrationPointingBasis[0]), "J2000");
   }
 
 
