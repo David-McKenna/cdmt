@@ -408,7 +408,7 @@ int main(int argc,char *argv[])
   printf("Loading %ld packets per gulp. Setting up reader...\n", packetGulp);
   reader = lofar_udp_meta_file_reader_setup_struct(&udp_cfg);
 
-  printf("Reader: %d, %d.\t %d, %d.\t %d, %ld, %d\n", reader->totalRawBeamlets, reader->totalProcBeamlets, reader->inputBitMode, reader->outputBitMode, reader->processingMode, reader->packetsPerIteration, reader->replayDroppedPackets);
+  printf("Reader: %d, %d.\t %d, %d.\t %d, %ld, %d\n", reader->meta->totalRawBeamlets, reader->meta->totalProcBeamlets, reader->meta->inputBitMode, reader->meta->outputBitMode, reader->meta->processingMode, reader->meta->packetsPerIteration, reader->meta->replayDroppedPackets);
 
   if (reader == NULL) {
     fprintf(stderr, "Failed to generate LOFAR UDP Reader, exiting.\n");
