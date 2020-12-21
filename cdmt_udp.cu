@@ -218,7 +218,6 @@ int main(int argc,char *argv[])
   break;
 
       case 'Z':
-  dreamBeam += 1;
   sscanf(optarg, "%d,%d", &beamletLower,&beamletUpper);
   break;
 
@@ -239,11 +238,6 @@ int main(int argc,char *argv[])
     return 0;
   }
   udpfname=argv[optind];
-
-  if (dreamBeam == 1) {
-    fprintf(stderr, "ERROR: Only part of dreamBeam informaiton was provided. Both -z and -Z need to be provided. Exiting.\n");
-    exit(1);
-  }
 
   // Sanity checks to avoid voids in output filterbank
   if (checkinputs) 
@@ -366,6 +360,7 @@ int main(int argc,char *argv[])
   // Determine the number of packets we need to request per iteration
   const long int packetGulp = nsamp / 16;
 
+  printf("Configuring reader...\n")
   lofar_udp_config udp_cfg = lofar_udp_config_default;
 
   udp_cfg.inputFiles = inputFiles;
@@ -381,11 +376,12 @@ int main(int argc,char *argv[])
   udp_cfg.beamletLimits[1] = beamletUpper;
   udp_cfg.calibrateData = dreamBeam;
 
+  printf("Configuring calibration...\n")
   lofar_udp_calibration udp_cal = lofar_udp_calibration_default;
   udp_cfg.calibrationConfiguration = &udp_cal;
   char fifo[128] = "/tmp/dreamBeamCDMTFIFO";
 
-  if (dreamBeam > 0) {
+  if (dreamBeam == 1) {
     strcpy(udp_cal.calibrationFifo, fifo);
     strcpy(udp_cal.calibrationSubbands, subbands);
     udp_cal.calibrationPointing[0] = (float) hdr.src_raj;
