@@ -622,11 +622,9 @@ int main(int argc,char *argv[])
 
   #pragma omp task shared(reader, tick0, tock0, nread_tmp, events)
   {
-    #pragma omp atomic update
     CLICK(tick0);
     #pragma omp atomic write
     nread_tmp = reshapeRawUdp(reader, checkinputs);
-    #pragma omp atomic update
     CLICK(tock0);
   }
 
@@ -675,11 +673,9 @@ int main(int argc,char *argv[])
     {
       // Hold the host execution until we can confirm the async memory transfer for the raw data has finished
       cudaEventSynchronize(events[0]);
-      #pragma omp atomic update
       CLICK(tick0);
       #pragma omp atomic write
       nread_tmp = reshapeRawUdp(reader, checkinputs);
-      #pragma omp atomic update
       CLICK(tock0);
     }
 
