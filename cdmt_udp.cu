@@ -621,6 +621,7 @@ int main(int argc,char *argv[])
   CLICK(tick);
 
   float dt = 0.0;
+  nread_tmp = reader->meta->packetsPerIteration;
 
   for (int iblock=0;;iblock++) {
 
