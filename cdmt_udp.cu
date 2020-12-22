@@ -619,18 +619,22 @@ int main(int argc,char *argv[])
     exit(0);
 
   CLICK(tick);
+
+  #pragma omp task shared(tick0, nread_tmp)
+  {
+    CLICK(tick0);
+    #pragma atomic write
+    nread_tmp = reshapeRawUdp(reader, checkinputs);
+    CLICK(tock0);
+  }
+  
   for (int iblock=0;;iblock++) {
 
-    // Hold the host execution until we can confirm the async memory transfer for the raw data has finished
-    cudaEventSynchronize(events[0]);
-
-    // Read in the next block
-    CLICK(tick0);
-    nread_tmp = reshapeRawUdp(reader, checkinputs);
+    // Wait to finish reading in the next block
+    #pragma omp taskwait
     if (nread > nread_tmp) {
       nread = nread_tmp;
     }
-    CLICK(tock0);
     // Determine the output length
     writeSize = (nread-writeOffset)*nsub/ndec;
 
@@ -663,6 +667,17 @@ int main(int argc,char *argv[])
 
     printf("%ld, %ld\n", sizeof(float)*nread*nsub, reader->meta->packetOutputLength[0] * reader->meta->packetsPerIteration);
     cudaEventRecord(events[0], stream);
+
+    // Start reading the next block of data, after the memcpy has finished
+    #pragma omp task shared(tick0, nread_tmp, events)
+    {
+      // Hold the host execution until we can confirm the async memory transfer for the raw data has finished
+      cudaEventSynchronize(events[0]);
+      CLICK(tick0);
+      #pragma atomic write
+      nread_tmp = reshapeRawUdp(reader, checkinputs);
+      CLICK(tock0);
+    }
 
     // Unpack data and padd data
     blocksize.x=32; blocksize.y=32; blocksize.z=1;
