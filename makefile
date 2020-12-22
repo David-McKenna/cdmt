@@ -20,7 +20,7 @@ NVCC = $(CUDAPATH)/bin/nvcc -arch=sm_70 -O3 --use_fast_math -ccbin=$(CXX)
 ifeq ($(CC), icc)
 LFLAGS_udp += -L$(ONEAPI_ROOT)/compiler/latest/linux/compiler/lib/intel64_lin/ -liomp5 -lirc"
 else 
-LFLAGS_udp += "
+LFLAGS_udp += -lgomp"
 endif
 
 cdmt: git cdmt.o
