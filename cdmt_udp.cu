@@ -620,7 +620,7 @@ int main(int argc,char *argv[])
 
   CLICK(tick);
 
-  float dt 0.0;
+  float dt = 0.0;
 
   for (int iblock=0;;iblock++) {
 
