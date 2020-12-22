@@ -666,7 +666,8 @@ int main(int argc,char *argv[])
 
     printf("Tasking\n");
     // Start reading the next block of data, after the memcpy has finished
-    #pragma omp parallel
+    #pragma omp parallel default(shared)
+    {
     #pragma omp task shared(reader, tick0, tock0, nread_tmp, events, dt)
     {
       printf("Tasked\n");
@@ -679,6 +680,7 @@ int main(int argc,char *argv[])
       #pragma omp atomic write
       dt = TICKTOCK(tick0, tock0);
       printf("Task end\n");
+    }
     }
     printf("CUDA\n");
 
@@ -818,7 +820,7 @@ int main(int argc,char *argv[])
     }
 
   }
-  }
+
 
   CLICK(tock);
   printf("Finished processing %lfs of data in %fs (%lf/s). Cleaning up...\n", timeInSeconds, TICKTOCK(tick, tock), (float) timeInSeconds / (float) TICKTOCK(tick, tock));
