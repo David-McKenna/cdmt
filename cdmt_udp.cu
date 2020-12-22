@@ -620,12 +620,16 @@ int main(int argc,char *argv[])
 
   CLICK(tick);
 
-
-  CLICK(tick0);
-  nread_tmp = reshapeRawUdp(reader, checkinputs);
-  CLICK(tock0);
-  float dt = TICKTOCK(tick0, tock0);
-
+  float dt;
+  #pragma omp task shared(reader, tick0, tock0, nread_tmp, events, dt)
+  {
+    CLICK(tick0);
+    #pragma omp atomic write
+    nread_tmp = reshapeRawUdp(reader, checkinputs);
+    CLICK(tock0);
+    #pragma omp atomic write
+    dt = TICKTOCK(tick0, tock0);
+  }
 
   #pragma omp parallel num_threads(2)
   {
@@ -633,6 +637,8 @@ int main(int argc,char *argv[])
 
     // Wait to finish reading in the next block
     #pragma omp taskwait
+
+
     if (nread > nread_tmp) {
       nread = nread_tmp;
     }
