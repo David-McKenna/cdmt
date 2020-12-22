@@ -630,8 +630,9 @@ int main(int argc,char *argv[])
   for (int iblock=0;;iblock++) {
 
     // Wait to finish reading in the next block
+    printf("Taskwait\n");
     #pragma omp taskwait
-
+    printf("Taskend\n");
 
     if (nread > nread_tmp) {
       nread = nread_tmp;
