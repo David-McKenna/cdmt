@@ -623,7 +623,7 @@ int main(int argc,char *argv[])
   float dt = 0.0;
   nread_tmp = reader->meta->packetsPerIteration * UDPNTIMESLICE;
 
-  #pragma omp parallel default(shared)
+  #pragma omp parallel default(shared) num_threads(10)
   {
   #pragma omp single nowait
   {
