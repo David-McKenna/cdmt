@@ -624,6 +624,7 @@ int main(int argc,char *argv[])
   CLICK(tick0);
   nread_tmp = reshapeRawUdp(reader, checkinputs);
   CLICK(tock0);
+  float dt = TICKTICK(tick0, tock0);
 
 
   #pragma omp parallel num_threads(2)
@@ -640,7 +641,7 @@ int main(int argc,char *argv[])
 
     // Count up the total bytes read and calculate the read time
     total_ts_read += nread;
-    printf("Block: %d: Read %ld MB in %.2f s\n",iblock,sizeof(char)*nread*nsub*4/(1<<20), TICKTOCK(tick0, tock0));
+    printf("Block: %d: Read %ld MB in %.2f s\n",iblock,sizeof(char)*nread*nsub*4/(1<<20), dt);
 
 
     // Sanity check the read data size
@@ -668,16 +669,22 @@ int main(int argc,char *argv[])
     printf("%ld, %ld\n", sizeof(float)*nread*nsub, reader->meta->packetOutputLength[0] * reader->meta->packetsPerIteration);
     cudaEventRecord(events[0], stream);
 
+    printf("Tasking\n");
     // Start reading the next block of data, after the memcpy has finished
-    #pragma omp task shared(reader, tick0, tock0, nread_tmp, events)
+    #pragma omp task shared(reader, tick0, tock0, nread_tmp, events, dt)
     {
+      printf("Tasked\n");
       // Hold the host execution until we can confirm the async memory transfer for the raw data has finished
       cudaEventSynchronize(events[0]);
       CLICK(tick0);
       #pragma omp atomic write
       nread_tmp = reshapeRawUdp(reader, checkinputs);
       CLICK(tock0);
+      #pragma omp atomic write
+      dt = TICKTOCK(tick0, tock0);
+      printf("Task end\n");
     }
+    printf("CUDA\n");
 
     // Unpack data and padd data
     blocksize.x=32; blocksize.y=32; blocksize.z=1;
