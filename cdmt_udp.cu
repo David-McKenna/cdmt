@@ -621,7 +621,7 @@ int main(int argc,char *argv[])
   CLICK(tick);
 
   float dt = 0.0;
-  nread_tmp = reader->meta->packetsPerIteration;
+  nread_tmp = reader->meta->packetsPerIteration * UDPNTIMESLICE;
 
   for (int iblock=0;;iblock++) {
 
@@ -667,8 +667,6 @@ int main(int argc,char *argv[])
 
     printf("Tasking\n");
     // Start reading the next block of data, after the memcpy has finished
-    #pragma omp parallel default(shared)
-    {
     #pragma omp task shared(reader, tick0, tock0, nread_tmp, events, dt)
     {
       printf("Tasked\n");
@@ -681,7 +679,6 @@ int main(int argc,char *argv[])
       #pragma omp atomic write
       dt = TICKTOCK(tick0, tock0);
       printf("Task end\n");
-    }
     }
     printf("CUDA\n");
 
@@ -1593,7 +1590,7 @@ int reshapeRawUdp(lofar_udp_reader *reader, int verbose) {
       }
     }
   }
-  nread *= 16;
+  nread *= UDPNTIMESLICE;
 
   return nread;
 }
