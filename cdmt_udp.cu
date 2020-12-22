@@ -627,7 +627,7 @@ int main(int argc,char *argv[])
     nread_tmp = reshapeRawUdp(reader, checkinputs);
     CLICK(tock0);
   }
-  
+
   for (int iblock=0;;iblock++) {
 
     // Wait to finish reading in the next block
@@ -818,19 +818,23 @@ int main(int argc,char *argv[])
 
 
   CLICK(tock);
-  printf("Finished processing %lfs of data in %fs (%lf/s). Cleaning up...\n", timeInSeconds, TICKTOCK(tick, tock), timeInSeconds / TICKTOCK(tick, tock));
+  printf("Finished processing %lfs of data in %fs (%lf/s). Cleaning up...\n", timeInSeconds, TICKTOCK(tick, tock), (float) timeInSeconds / (float) TICKTOCK(tick, tock));
 
 
   //omp_destroy_lock(&readLock);
   // Close files
+  printf("Closing files...\n");
   for (i=0;i<ndm;i++)
     fclose(outfile[i]);
 
   // Reader cleanup
+  printf("Cleaning up the reader...\n");
   lofar_udp_reader_cleanup(reader);
 
   // Free
+  printf("Free the header...\n");
   free(header);
+  printf("Free the GPU dedbuff\n");
   if (dreamBeam == 0) {
     for (i=0;i<4;i++) {
       cudaFree(dudpbuf_c[i]);  
@@ -840,10 +844,12 @@ int main(int argc,char *argv[])
       cudaFree(dudpbuf_f[i]);  
     }
   }
+  printf("Free host data...\n");
   free(fbuf);
   free(dm);
   free(outfile);
 
+  printf("Free deci/output components\n");
   if (redig) {
     for (i = 0; i < ndm; i++)
       for (j =0; j < 2; j++)
@@ -860,6 +866,7 @@ int main(int argc,char *argv[])
     if (ndec > 1) cudaFree(dcbuff);
   }
 
+  printf("Cuda workspace...\n");
   cudaFree(cufftWorkArea);
   cudaFree(dfbuf);
   cudaFree(cp1);
@@ -870,14 +877,18 @@ int main(int argc,char *argv[])
   cudaFree(ddm);
 
   // Free plan
+  printf("cuFFT....\n");
   cufftDestroy(ftc2cf);
   cufftDestroy(ftc2cb);
 
+  printf("Streams...\n");
   for(i = 0; i < numStreams + 1; i++)
     cudaStreamDestroy(streams[i]);
+  printf("Events....\n");
   for(i = 0; i < numEvents; i++)
     cudaEventDestroy(events[i]);
 
+  printf("DM events...\n");
   for (i = 0; i < ndm; i++)
     for (j =0; j < numStreams; j++)
       cudaEventDestroy(dmWriteEvents[j][i]);
