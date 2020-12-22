@@ -620,14 +620,14 @@ int main(int argc,char *argv[])
 
   CLICK(tick);
 
-  #pragma omp task shared(reader, tick0, tock0, nread_tmp, events)
-  {
-    CLICK(tick0);
-    #pragma omp atomic write
-    nread_tmp = reshapeRawUdp(reader, checkinputs);
-    CLICK(tock0);
-  }
 
+  CLICK(tick0);
+  nread_tmp = reshapeRawUdp(reader, checkinputs);
+  CLICK(tock0);
+
+
+  #pragma omp parallel
+  {
   for (int iblock=0;;iblock++) {
 
     // Wait to finish reading in the next block
@@ -815,7 +815,7 @@ int main(int argc,char *argv[])
     }
 
   }
-
+  }
 
   CLICK(tock);
   printf("Finished processing %lfs of data in %fs (%lf/s). Cleaning up...\n", timeInSeconds, TICKTOCK(tick, tock), (float) timeInSeconds / (float) TICKTOCK(tick, tock));
@@ -852,7 +852,7 @@ int main(int argc,char *argv[])
   printf("Free deci/output components\n");
   if (redig) {
     for (i = 0; i < ndm; i++)
-      for (j =0; j < 2; j++)
+      for (j =0; j < numStreams; j++)
         free(cbuf[j][i]);
     cudaFree(bs1);
     cudaFree(bs2);
@@ -861,12 +861,14 @@ int main(int argc,char *argv[])
     cudaFree(dcbuf);
   } else {
     printf("Loopy\n");
-    for (i = 0; i < ndm; i++)
-      for (j =0; j < 2; j++)
+    for (j =0; j < numStreams; j++)
+      for (i = 0; i < ndm; i++)
         free(cbuff[j][i]);
-      printf("Deci\n");
+      free(cbuff[j]);    
+    printf("Deci\n");
     if (ndec > 1) cudaFree(dcbuff);
   }
+
 
   printf("Cuda workspace...\n");
   cudaFree(cufftWorkArea);
