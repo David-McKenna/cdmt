@@ -620,11 +620,13 @@ int main(int argc,char *argv[])
 
   CLICK(tick);
 
-  #pragma omp task shared(tick0, nread_tmp)
+  #pragma omp task shared(reader, tick0, tock0, nread_tmp, events)
   {
+    #pragma omp atomic update
     CLICK(tick0);
-    #pragma atomic write
+    #pragma omp atomic write
     nread_tmp = reshapeRawUdp(reader, checkinputs);
+    #pragma omp atomic update
     CLICK(tock0);
   }
 
@@ -669,13 +671,15 @@ int main(int argc,char *argv[])
     cudaEventRecord(events[0], stream);
 
     // Start reading the next block of data, after the memcpy has finished
-    #pragma omp task shared(tick0, nread_tmp, events)
+    #pragma omp task shared(reader, tick0, tock0, nread_tmp, events)
     {
       // Hold the host execution until we can confirm the async memory transfer for the raw data has finished
       cudaEventSynchronize(events[0]);
+      #pragma omp atomic update
       CLICK(tick0);
-      #pragma atomic write
+      #pragma omp atomic write
       nread_tmp = reshapeRawUdp(reader, checkinputs);
+      #pragma omp atomic update
       CLICK(tock0);
     }
 
@@ -860,9 +864,11 @@ int main(int argc,char *argv[])
     cudaFree(zstd);
     cudaFree(dcbuf);
   } else {
+    printf("Loopy\n");
     for (i = 0; i < ndm; i++)
       for (j =0; j < 2; j++)
         free(cbuff[j][i]);
+      printf("Deci\n");
     if (ndec > 1) cudaFree(dcbuff);
   }
 
