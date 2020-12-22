@@ -623,6 +623,10 @@ int main(int argc,char *argv[])
   float dt = 0.0;
   nread_tmp = reader->meta->packetsPerIteration * UDPNTIMESLICE;
 
+  #pragma omp parallel default(shared)
+  {
+  #pragma omp single nowait
+  {
   for (int iblock=0;;iblock++) {
 
     // Wait to finish reading in the next block
@@ -817,6 +821,10 @@ int main(int argc,char *argv[])
       writeOffset = 0;
     }
 
+  }
+  // Parallel
+  }
+  // Single nowait
   }
 
 
