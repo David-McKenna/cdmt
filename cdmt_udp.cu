@@ -624,7 +624,7 @@ int main(int argc,char *argv[])
   CLICK(tick0);
   nread_tmp = reshapeRawUdp(reader, checkinputs);
   CLICK(tock0);
-  float dt = TICKTICK(tick0, tock0);
+  float dt = TICKTOCK(tick0, tock0);
 
 
   #pragma omp parallel num_threads(2)
