@@ -620,21 +620,8 @@ int main(int argc,char *argv[])
 
   CLICK(tick);
 
-  float dt;
-  #pragma omp task shared(reader, tick0, tock0, nread_tmp, events, dt)
-  {
-    CLICK(tick0);
-    #pragma omp atomic write
-    nread_tmp = reshapeRawUdp(reader, checkinputs);
-    CLICK(tock0);
-    #pragma omp atomic write
-    dt = TICKTOCK(tick0, tock0);
-  }
+  float dt 0.0;
 
-  #pragma omp parallel default(shared)
-  {
-  printf("Starting main loop after initial read (%fs).\n", dt);
-  #pragma omp single
   for (int iblock=0;;iblock++) {
 
     // Wait to finish reading in the next block
@@ -679,6 +666,7 @@ int main(int argc,char *argv[])
 
     printf("Tasking\n");
     // Start reading the next block of data, after the memcpy has finished
+    #pragma omp parallel
     #pragma omp task shared(reader, tick0, tock0, nread_tmp, events, dt)
     {
       printf("Tasked\n");
