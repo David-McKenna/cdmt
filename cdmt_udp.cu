@@ -631,7 +631,7 @@ int main(int argc,char *argv[])
     dt = TICKTOCK(tick0, tock0);
   }
 
-  #pragma omp parallel default(shared) num_threads(2)
+  #pragma omp parallel default(shared) num_threads(16)
   {
   printf("Starting main loop after initial read (%fs).\n", dt);
   #pragma omp single
