@@ -634,6 +634,7 @@ int main(int argc,char *argv[])
   #pragma omp parallel default(shared) num_threads(2)
   {
   printf("Starting main loop after initial read (%fs).\n", dt);
+  #pragma omp single
   for (int iblock=0;;iblock++) {
 
     // Wait to finish reading in the next block
