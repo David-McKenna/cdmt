@@ -5,7 +5,7 @@ CUDAPATH = $(shell dirname $(shell dirname $(shell which nvcc)))
 CFLAGS = -I./cuda-samples/Common
 
 CFLAGS_hdf = $(CFLAGS) -I/usr/include/hdf5/serial/
-CFLAGS_udp = $(CFLAGS) -Xcompiler "-fopenmp"
+CFLAGS_udp = $(CFLAGS) -Xcompiler -fopenmp
 
 # Linking flags
 LFLAGS = -lm -L$(CUDAPATH)/lib64 -lcufft -lhdf5 -lcurand

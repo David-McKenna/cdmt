@@ -626,7 +626,7 @@ int main(int argc,char *argv[])
   CLICK(tock0);
 
 
-  #pragma omp parallel
+  #pragma omp parallel num_threads(2)
   {
   for (int iblock=0;;iblock++) {
 
