@@ -371,7 +371,7 @@ int main(int argc,char *argv[])
   udp_cfg.packetsPerIteration = packetGulp;
   udp_cfg.startingPacket = startingPacket;
   udp_cfg.packetsReadMax = LONG_MAX;
-  udp_cfg.compressedReader = compressedInput;
+  udp_cfg.readerType = compressedInput;
   udp_cfg.beamletLimits[0] = beamletLower;
   udp_cfg.beamletLimits[1] = beamletUpper;
   udp_cfg.calibrateData = dreamBeam;
