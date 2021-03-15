@@ -111,6 +111,7 @@ void usage()
   printf("-t               Perform a dry run; proceed as expected until we would start processing data.\n");
   printf("-z <subband strategy>     Apply dreamBeam corrections to voltages (default: false).\n");
   printf("-Z <lower>,<upper>        Extract only the specific beamlets (default: all)\n");
+  printf("-k <offset>      PSRDADA input, set offset between ringbuffers (default: 10)\n");
 
   return;
 }
@@ -135,7 +136,7 @@ int main(int argc,char *argv[])
   int bytes_read;
   long int ts_read=LONG_MAX;
   long int total_ts_read=0;
-  int part=0,device=0,nforward=128,redig=1,ports=4,baseport=16130,checkinputs=1,testmode=0,dreamBeam=0,beamletLower=0,beamletUpper=0;
+  int part=0,device=0,nforward=128,redig=1,ports=4,baseport=16130,checkinputs=1,testmode=0,dreamBeam=0,beamletLower=0,beamletUpper=0,dadaoffset=10,dadainput=0;
   int arg=0;
   FILE **outfile;
   struct timespec tick, tick0, tick1, tock, tock0;
@@ -145,7 +146,7 @@ int main(int argc,char *argv[])
 
   // Read options
   if (argc>1) {
-    while ((arg=getopt(argc,argv,"tawc:p:f:d:D:ho:b:N:n:s:r:m:t:p:l:z:Z:"))!=-1) {
+    while ((arg=getopt(argc,argv,"tawc:p:f:d:D:ho:b:N:n:s:r:m:t:p:l:z:Z:k:"))!=-1) {
       switch (arg) {
   
       case 'n':
@@ -219,6 +220,11 @@ int main(int argc,char *argv[])
 
       case 'Z':
   sscanf(optarg, "%d,%d", &beamletLower,&beamletUpper);
+  break;
+
+      case 'k':
+  dadainput=1;
+  dadaoffset=atoi(optarg);
   break;
 
       case 'h':
@@ -315,22 +321,24 @@ int main(int argc,char *argv[])
 
 
   // Open raw files
-  for (int i = 0; i < ports; i++) {
-    sprintf(tmpfname, udpfname, i + baseport);
-    if (strcmp(udpfname, tmpfname) == 0 && ports > 1) {
-      fprintf(stderr, "ERROR: Input file name has not changed when attempting to substitute in port, have you correctly defined your file name?\n");
-      exit(1);
+  if (dadainput== 0) {
+    for (int i = 0; i < ports; i++) {
+      sprintf(tmpfname, udpfname, i + baseport);
+      if (strcmp(udpfname, tmpfname) == 0 && ports > 1) {
+        fprintf(stderr, "ERROR: Input file name has not changed when attempting to substitute in port, have you correctly defined your file name?\n");
+        exit(1);
+      }
+      printf("Opening %s...\n", tmpfname);
+
+      inputFiles[i] = fopen(tmpfname, "r");
+
+      if (inputFiles[i] == NULL) {
+        printf("Input file failed to open (null pointer)\n");
+      }
+
+      if (i == 0)
+        strcpy(hdr.rawfname[i],tmpfname);
     }
-    printf("Opening %s...\n", tmpfname);
-
-    inputFiles[i] = fopen(tmpfname, "r");
-
-    if (inputFiles[i] == NULL) {
-      printf("Input file failed to open (null pointer)\n");
-    }
-
-    if (i == 0)
-      strcpy(hdr.rawfname[i],tmpfname);
   }
 
   // Read the number of raw subbands + sampling time for later
@@ -363,7 +371,15 @@ int main(int argc,char *argv[])
   printf("Configuring reader...\n");
   lofar_udp_config udp_cfg = lofar_udp_config_default;
 
-  udp_cfg.inputFiles = inputFiles;
+  if (dadainput == 0) {
+    udp_cfg.inputFiles = inputFiles;
+    udp_cfg.readerType = compressedInput;
+  } else {
+    for (int i = 0; i < ports; i++)
+      udp_cfg.dadaKeys[i] = atoi(udpfname) + i * dadaoffset;
+
+    udp_cfg.readerType = DADA_ACTIVE;
+  }
   udp_cfg.numPorts = ports;
   udp_cfg.replayDroppedPackets = 1;
   udp_cfg.processingMode = 11;
@@ -371,7 +387,6 @@ int main(int argc,char *argv[])
   udp_cfg.packetsPerIteration = packetGulp;
   udp_cfg.startingPacket = startingPacket;
   udp_cfg.packetsReadMax = LONG_MAX;
-  udp_cfg.readerType = compressedInput;
   udp_cfg.beamletLimits[0] = beamletLower;
   udp_cfg.beamletLimits[1] = beamletUpper;
   udp_cfg.calibrateData = dreamBeam;

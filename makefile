@@ -9,7 +9,7 @@ CFLAGS_udp = $(CFLAGS) -Xcompiler "-fopenmp"
 
 # Linking flags
 LFLAGS = -lm -L$(CUDAPATH)/lib64 -lcufft -lhdf5 -lcurand
-LFLAGS_udp = -lm -L$(CUDAPATH)/lib64 -L./cuda-samples/Common -lcufft -lcurand -Xlinker "-lzstd -llofudpman
+LFLAGS_udp = -lm -L$(CUDAPATH)/lib64 -L./cuda-samples/Common -lcufft -lcurand -Xlinker "-lzstd -llofudpman -lpsrdada
 
 
 # Compilers
